@@ -1,0 +1,133 @@
+/** 可重试的错误码：只认平台明确说过「稍后再试」的那几类。 */
+const RETRYABLE_CODES = new Set([
+    'rate_limited',
+    'overload',
+    'server_error',
+    'network_error',
+    'timeout',
+]);
+function str(row, key) {
+    const value = row[key];
+    return typeof value === 'string' ? value : null;
+}
+function num(row, key) {
+    const value = row[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+export class OutboxWorker {
+    options;
+    now;
+    constructor(options) {
+        this.options = options;
+        this.now = options.now ?? (() => Date.now());
+    }
+    /**
+     * 取一批待发消息并逐条投递。
+     *
+     * 返回的每一项都对应 outbox 里真实发生过的一次状态变化，供 scheduler 记账
+     * 与 `/fish status` 展示；调用方不依赖它做业务判断。
+     */
+    async runOnce(nowMs = this.now()) {
+        const { repos, transport, metrics } = this.options;
+        // 重启后的自救：sending 一律降级 unknown，避免「可能已发」被当成失败重发。
+        const recovered = repos.recoverOutbox();
+        if (recovered > 0)
+            metrics.count('outbox.recovered_unknown', recovered);
+        const rows = repos.claimOutbox(nowMs, this.options.limit ?? 5);
+        const outcomes = [];
+        for (const row of rows) {
+            const id = str(row, 'id');
+            const conversationId = str(row, 'conversation_id');
+            if (id === null || conversationId === null)
+                continue;
+            const chatId = this.options.chatForConversation(conversationId);
+            if (chatId === null) {
+                repos.finishOutbox(id, { kind: 'rejected', code: 'no_chat_target', atMs: nowMs });
+                outcomes.push({ id, status: 'cancelled', reason: 'no_chat_target', chatId: null });
+                metrics.count('outbox.cancelled', 1);
+                continue;
+            }
+            const cancelled = this.recheck(row, conversationId, nowMs);
+            if (cancelled !== null) {
+                repos.finishOutbox(id, { kind: 'rejected', code: `cancelled:${cancelled}`, atMs: nowMs });
+                outcomes.push({ id, status: 'cancelled', reason: cancelled, chatId });
+                metrics.count(`outbox.cancelled.${cancelled}`, 1);
+                continue;
+            }
+            const content = str(row, 'content') ?? '';
+            if (content.trim().length === 0) {
+                repos.finishOutbox(id, { kind: 'rejected', code: 'empty_content', atMs: nowMs });
+                outcomes.push({ id, status: 'cancelled', reason: 'empty_content', chatId });
+                continue;
+            }
+            const startedAt = this.now();
+            let receipt;
+            try {
+                receipt = await transport.sendText(chatId, content);
+            }
+            catch (error) {
+                // 传输层自身抛错 = 我们不知道平台有没有收到：按 unknown 处理，不重发。
+                receipt = { kind: 'unknown', code: 'transport_threw', atMs: this.now() };
+                metrics.degrade(`主动消息发送异常：${error instanceof Error ? error.message : String(error)}`);
+            }
+            metrics.span('', 'send', startedAt, this.now());
+            repos.finishOutbox(id, receipt);
+            const taskId = str(row, 'task_id');
+            if (receipt.kind === 'accepted' && taskId !== null) {
+                // 提醒发出后即完成；未确认的提醒不在这里改状态（它还需要用户确认）。
+                const task = repos.dueTasks(nowMs, 100).find(item => str(item, 'id') === taskId);
+                if (task !== undefined)
+                    repos.setTaskStatus(taskId, 'done');
+            }
+            if (receipt.kind === 'accepted') {
+                outcomes.push({ id, status: 'sent', receipt, chatId });
+                metrics.count('outbox.sent', 1);
+            }
+            else if (receipt.kind === 'rejected') {
+                const code = receipt.code ?? 'unknown_reject';
+                const attempts = num(row, 'attempts') ?? 0;
+                const retryable = RETRYABLE_CODES.has(code) && attempts < 2;
+                outcomes.push({ id, status: 'failed', receipt, chatId, retryable });
+                metrics.count('outbox.failed', 1);
+                if (retryable) {
+                    // 回到 pending 让下一轮再试；attempts 已在 claim 时 +1。
+                    repos.replanOutbox(id, nowMs + 60_000);
+                }
+            }
+            else {
+                outcomes.push({ id, status: 'unknown', receipt, chatId });
+                metrics.count('outbox.unknown', 1);
+                metrics.degrade('主动消息回执 unknown：可能已送达，不自动重发');
+            }
+        }
+        return outcomes;
+    }
+    /** 发送前复核（§14.4）。返回取消原因，null 表示可以发。 */
+    recheck(row, conversationId, nowMs) {
+        const { repos, config } = this.options;
+        const expected = num(row, 'expected_inbound_seq');
+        if (expected !== null) {
+            const latest = repos.latestInboundSeq(conversationId);
+            if (latest > expected)
+                return 'user_spoke_first';
+        }
+        const plannedAt = num(row, 'planned_at_ms') ?? nowMs;
+        // 过期兜底：超过一天的主动消息不再补发（陈旧问候不如不发）。
+        if (nowMs - plannedAt > 24 * 60 * 60_000)
+            return 'expired';
+        const taskId = str(row, 'task_id');
+        if (taskId !== null) {
+            const task = repos.dueTasks(nowMs, 100).find(item => str(item, 'id') === taskId);
+            if (task === undefined) {
+                // 提醒可能已经完成或被取消：只有确认过状态才取消。
+                const pending = repos.pendingTasks(conversationId, 50).find(item => str(item, 'id') === taskId);
+                if (pending === undefined)
+                    return 'task_finished';
+            }
+        }
+        if (!config.proactive.enabled)
+            return 'proactive_disabled';
+        return null;
+    }
+}
+//# sourceMappingURL=outbox-worker.js.map

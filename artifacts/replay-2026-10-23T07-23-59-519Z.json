@@ -1,0 +1,149 @@
+{
+  "generatedAt": "2026-10-23T07:23:59.519Z",
+  "turns": 400,
+  "statuses": {
+    "say-only": 97,
+    "failed": 301,
+    "completed": 2
+  },
+  "problems": {
+    "evt-apply-failed:Error: FOREIGN KEY constraint failed": 17,
+    "evt-unclosed": 38,
+    "evt-skip:target_not_self": 16,
+    "model-failed": 301,
+    "evt-invalid:not-object": 3,
+    "text-before-say": 2
+  },
+  "failures": [
+    {
+      "turn": 111,
+      "reason": "完成态却没有正文"
+    },
+    {
+      "turn": 224,
+      "reason": "完成态却没有正文"
+    }
+  ],
+  "failureCount": 2,
+  "counts": {
+    "raw_messages": 497,
+    "turns": 400,
+    "appraisals": 0,
+    "affect_events": 0,
+    "relationship_episodes": 0,
+    "memories": 0,
+    "tasks": 0,
+    "outbox": 0,
+    "background_jobs": 0
+  },
+  "metrics": {
+    "stats": [
+      {
+        "phase": "assembly",
+        "count": 800,
+        "p50": 10,
+        "p95": 32740239412,
+        "max": 32740239517,
+        "targetMs": 50,
+        "met": false
+      },
+      {
+        "phase": "retrieval",
+        "count": 400,
+        "p50": 1,
+        "p95": 2,
+        "max": 17,
+        "targetMs": 50,
+        "met": true
+      },
+      {
+        "phase": "queue-wait",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 250,
+        "met": false
+      },
+      {
+        "phase": "provider-first-token",
+        "count": 99,
+        "p50": 0,
+        "p95": 1,
+        "max": 5,
+        "targetMs": 1200,
+        "met": true
+      },
+      {
+        "phase": "say-close",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 3000,
+        "met": false
+      },
+      {
+        "phase": "evt-apply",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 30,
+        "met": false
+      },
+      {
+        "phase": "send",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 1000,
+        "met": false
+      },
+      {
+        "phase": "total",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 4000,
+        "met": false
+      }
+    ],
+    "counters": {},
+    "degraded": [
+      "evt 校验失败：JSON 解析失败：Unexpected end of JSON input",
+      "回合失败：TypeError: Cannot read properties of undefined (reading 'say')"
+    ],
+    "samplesKept": 1299
+  },
+  "ledger": {
+    "foreground": {
+      "calls": 99,
+      "inputTokens": 118800,
+      "outputTokens": 17820,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "background": {
+      "calls": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "proactive": {
+      "calls": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "unknownCount": 297
+  },
+  "sentMessages": 97
+}

@@ -1,0 +1,63 @@
+{
+  "name": "dsh-companion-memory",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "prompts",
+    "migrations",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "integration",
+    "scripts",
+    "docs"
+  ],
+  "description": "Companion memory, affect continuity and QQ output protocol for DeepSeek Harness: local SQLite authority, evidence-backed long-term memory, reducible emotional state, proactive outbox.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "companion",
+    "memory",
+    "affect",
+    "qq"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dshx": {
+    "contributes": {
+      "tools": [],
+      "skills": []
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "node scripts/build.mjs --check-only",
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "test:unit": "node --test \"tests/unit/**/*.test.mjs\"",
+    "test:integration": "node --test \"tests/integration/**/*.test.mjs\"",
+    "test:replay": "node scripts/replay.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "benchmark": "node scripts/benchmark.mjs --mode local",
+    "bench:local": "node scripts/benchmark.mjs --mode local",
+    "bench:live": "node scripts/benchmark.mjs --mode live --smoke",
+    "replay": "node scripts/replay.mjs",
+    "package": "node scripts/package.mjs",
+    "bridge:check": "node scripts/patch-qq-bridge.mjs",
+    "bridge:verify": "node scripts/verify-qq-bridge.mjs"
+  },
+  "license": "MIT"
+}

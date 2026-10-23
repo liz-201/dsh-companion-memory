@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Session scratch / one-off debugging files (never part of the package)
+# ---------------------------------------------------------------------------
+_probe.mjs
+_repair.mjs
+_recover.*
+_recover2.txt
+_tools/
+
+# ---------------------------------------------------------------------------
+# Vendored toolchain
+# The unpacked TypeScript 5.9.3 + @types/node trees ARE committed so a fresh
+# clone can build offline (see docs/ENVIRONMENT.md). The redundant archive and
+# the empty staging directory are not.
+# ---------------------------------------------------------------------------
+_vendor/*.tgz
+_vendor/unpack/
+
+# ---------------------------------------------------------------------------
+# Local runtime state
+# ---------------------------------------------------------------------------
+node_modules/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+backups/
+*.log
+
+# ---------------------------------------------------------------------------
+# OS / editor noise
+# ---------------------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+.idea/
+.vscode/

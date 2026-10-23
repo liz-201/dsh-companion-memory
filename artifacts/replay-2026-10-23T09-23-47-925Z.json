@@ -1,0 +1,136 @@
+{
+  "generatedAt": "2026-10-23T09:23:47.925Z",
+  "turns": 200,
+  "statuses": {
+    "say-only": 90,
+    "completed": 110
+  },
+  "problems": {
+    "evt-skip:target_not_self": 69,
+    "evt-unclosed": 6,
+    "text-before-say": 5,
+    "plain-fallback": 5
+  },
+  "failures": [],
+  "failureCount": 0,
+  "counts": {
+    "raw_messages": 400,
+    "turns": 200,
+    "appraisals": 0,
+    "affect_events": 75,
+    "relationship_episodes": 3,
+    "memories": 1,
+    "tasks": 0,
+    "outbox": 200,
+    "background_jobs": 0
+  },
+  "metrics": {
+    "stats": [
+      {
+        "phase": "assembly",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 50,
+        "met": false
+      },
+      {
+        "phase": "retrieval",
+        "count": 200,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 50,
+        "met": true
+      },
+      {
+        "phase": "queue-wait",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 250,
+        "met": false
+      },
+      {
+        "phase": "provider-first-token",
+        "count": 200,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 1200,
+        "met": true
+      },
+      {
+        "phase": "say-close",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 3000,
+        "met": false
+      },
+      {
+        "phase": "evt-apply",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 30,
+        "met": false
+      },
+      {
+        "phase": "send",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 1000,
+        "met": false
+      },
+      {
+        "phase": "total",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 4000,
+        "met": false
+      }
+    ],
+    "counters": {},
+    "degraded": [],
+    "samplesKept": 400
+  },
+  "ledger": {
+    "foreground": {
+      "calls": 200,
+      "inputTokens": 240000,
+      "outputTokens": 36000,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "background": {
+      "calls": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "proactive": {
+      "calls": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "unknownCount": 600
+  },
+  "sentMessages": 200,
+  "modelCalls": 200,
+  "maxEstimatedRequestTokens": 4000
+}

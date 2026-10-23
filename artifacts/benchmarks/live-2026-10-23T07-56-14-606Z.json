@@ -1,0 +1,13 @@
+{
+  "generatedAt": "2026-10-23T07:56:14.606Z",
+  "mode": "live",
+  "smoke": true,
+  "samples": 3,
+  "model": null,
+  "endpoint": null,
+  "prompt": "用一句话回答：今天适合加班吗？",
+  "results": [],
+  "status": "NOT_RUN",
+  "note": "live 模式只测模型链路延迟，不含 QQ 发送；凭据通过环境变量注入，不落盘。",
+  "reason": "missing-credentials"
+}

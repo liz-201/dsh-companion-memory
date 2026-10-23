@@ -1,0 +1,137 @@
+{
+  "generatedAt": "2026-10-23T07:33:08.906Z",
+  "turns": 400,
+  "statuses": {
+    "say-only": 252,
+    "completed": 148
+  },
+  "problems": {
+    "evt-skip:target_not_self": 138,
+    "memory-quote-not-found": 69,
+    "evt-invalid:not-object": 12,
+    "text-before-say": 11,
+    "plain-fallback": 11
+  },
+  "failures": [],
+  "failureCount": 0,
+  "counts": {
+    "raw_messages": 800,
+    "turns": 400,
+    "appraisals": 0,
+    "affect_events": 148,
+    "relationship_episodes": 1,
+    "memories": 0,
+    "tasks": 0,
+    "outbox": 0,
+    "background_jobs": 0
+  },
+  "metrics": {
+    "stats": [
+      {
+        "phase": "assembly",
+        "count": 800,
+        "p50": 5,
+        "p95": 32740788784,
+        "max": 32740788904,
+        "targetMs": 50,
+        "met": false
+      },
+      {
+        "phase": "retrieval",
+        "count": 400,
+        "p50": 1,
+        "p95": 2,
+        "max": 15,
+        "targetMs": 50,
+        "met": true
+      },
+      {
+        "phase": "queue-wait",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 250,
+        "met": false
+      },
+      {
+        "phase": "provider-first-token",
+        "count": 400,
+        "p50": 0,
+        "p95": 0,
+        "max": 3,
+        "targetMs": 1200,
+        "met": true
+      },
+      {
+        "phase": "say-close",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 3000,
+        "met": false
+      },
+      {
+        "phase": "evt-apply",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 30,
+        "met": false
+      },
+      {
+        "phase": "send",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 1000,
+        "met": false
+      },
+      {
+        "phase": "total",
+        "count": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0,
+        "targetMs": 4000,
+        "met": false
+      }
+    ],
+    "counters": {},
+    "degraded": [
+      "evt 校验失败：JSON 解析失败：Unexpected end of JSON input"
+    ],
+    "samplesKept": 1600
+  },
+  "ledger": {
+    "foreground": {
+      "calls": 400,
+      "inputTokens": 480000,
+      "outputTokens": 72000,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "background": {
+      "calls": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "proactive": {
+      "calls": 0,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheHitTokens": 0,
+      "cacheMissTokens": 0,
+      "reasoningTokens": 0
+    },
+    "unknownCount": 1200
+  },
+  "sentMessages": 400
+}

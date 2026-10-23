@@ -1,0 +1,10 @@
+# dsh-companion-memory bundle patch.
+#
+# 本文件由 package.json 的 `dsh.bundle.patch` 指向，随包一起分发；宿主在
+# bundle 层读取后与本 profile 的 cordis.patch.yml 合并。必须是「顶层 YAML 数组」。
+#
+# 注意（实测）：insert 块内的 `config` 不可寻址，compose 自检会拒绝；运行配置
+# 一律写在 profile 层 cordis.patch.yml 的同 id 顶层行里，见 docs/INSTALL.md。
+- insert:
+    - id: dsh-companion-memory
+      name: 'dsh-companion-memory'
