@@ -20,8 +20,10 @@ import type { Repositories } from '../storage/repositories.js'
 import { opportunityScore } from './opportunity.js'
 import { topicAcceptance } from './feedback.js'
 import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
+import { proactiveFrequency } from './frequency.js'
+import { computerEvidence } from './computer-evidence.js'
 
-export type CandidateKind = 'reminder' | 'open_topic' | 'repair' | 'small_talk' | 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic'
+export type CandidateKind = 'reminder' | 'open_topic' | 'repair' | 'small_talk' | 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'computer_event'
 
 export interface Candidate {
     /** 稳定键：同一候选重复扫描不会重复入队（outbox.candidate_key 唯一）。 */
@@ -129,14 +131,16 @@ export function checkGates(input: CandidateInput): GateResult {
     if (Number(repos.getSetting(`proactive.snooze-until:${input.principalId}`) ?? 0) > nowMs) blocked.push('user-busy')
 
     const dailySince = startOfDayMs(nowMs, config.proactive.timezone)
+    const frequency = proactiveFrequency(config, repos, input.principalId)
     const sentToday = repos.countOutboxSince(conversationId, dailySince)
-    if (sentToday >= config.proactive.spontaneousLimitPerDay) blocked.push('daily-limit')
+    if (sentToday >= frequency.dailyLimit) blocked.push('daily-limit')
     const globalCount = Number(repos.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM outbox WHERE ${SPONTANEOUS_OUTBOX} AND planned_at_ms >= ? AND status IN ('pending','sending','sent','unknown')`, dailySince)?.n ?? 0)
-    if (globalCount >= config.proactive.spontaneousLimitPerDay) blocked.push('global-daily-limit')
+    if (globalCount >= frequency.dailyLimit) blocked.push('global-daily-limit')
 
-    const last = input.lastProactiveAtMs
+    const latestDelivery = repos.db.get<{ at: number }>(`SELECT COALESCE(sent_at_ms, planned_at_ms) AS at FROM outbox WHERE ${SPONTANEOUS_OUTBOX} AND status IN ('sent','unknown') ORDER BY at DESC LIMIT 1`)
+    const last = input.lastProactiveAtMs === undefined ? latestDelivery?.at : Math.max(input.lastProactiveAtMs, latestDelivery?.at ?? 0)
     if (last !== undefined) {
-        const gapMs = config.proactive.spontaneousMinGapMinutes * 60_000
+        const gapMs = frequency.minGapMinutes * 60_000
         if (nowMs - last < gapMs) blocked.push('cooldown')
     }
 
@@ -231,13 +235,14 @@ function smallTalkCandidate(input: CandidateInput): Candidate[] {
     const { repos, conversationId, nowMs } = input
     repos.db.run("UPDATE proactive_opportunities SET status = 'expired' WHERE status = 'pending' AND expires_at_ms <= ?", nowMs)
     return repos.db.all<Record<string, unknown>>("SELECT * FROM proactive_opportunities WHERE conversation_id = ? AND status = 'pending' AND not_before_ms <= ? AND expires_at_ms > ? ORDER BY created_at_ms LIMIT 20", conversationId, nowMs, nowMs).filter(row => {
+      if (row['kind'] === 'computer_event' && !input.config.computerEvents.enabled) return false
       const blockedSource = repos.getSetting(`proactive.blocked-kind:${input.principalId}:${String(row['kind'])}`)
       if (blockedSource && repos.getRawMessage(blockedSource)?.deletedAtMs === null) return false
       return (JSON.parse(String(row['source_ids_json'])) as string[]).every(id => {
         const blockedBy = repos.getSetting(`proactive.blocked-source:${input.principalId}:${id}`)
         if (blockedBy && repos.getRawMessage(blockedBy)?.deletedAtMs === null) return false
         const raw = repos.getRawMessage(id), memory = repos.getMemory(id)
-        return raw && raw.deletedAtMs === null || memory && memory.status === 'active' && memory.principal_id === input.principalId
+        return raw && raw.deletedAtMs === null || memory && memory.status === 'active' && memory.principal_id === input.principalId || computerEvidence(repos, id, input.principalId, conversationId, nowMs)
       })
     }).map(row => {
       const state = repos.getSnapshot(input.principalId)?.snapshot

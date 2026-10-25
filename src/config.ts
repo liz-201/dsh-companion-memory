@@ -60,6 +60,10 @@ export interface AffectConfig {
 }
 
 export interface ProactiveConfig {
+  adaptiveFrequency: boolean
+  adaptiveMaxDailyLimit: number
+  adaptiveMinGapMinutes: number
+  modelInterests: string[]
   opportunityThreshold: number
   shareSources: string[]
   enabled: boolean
@@ -71,6 +75,16 @@ export interface ProactiveConfig {
   spontaneousMinGapMinutes: number
   pauseAfterUnanswered: number
   maxGenerationCallsPerCandidate: number
+}
+
+export interface ComputerEventsConfig {
+  enabled: boolean
+  pollSeconds: number
+  idleThresholdSeconds: number
+  foregroundApplications: boolean
+  resources: boolean
+  network: boolean
+  watchDirectories: string[]
 }
 
 export interface BackgroundConfig {
@@ -139,6 +153,7 @@ export interface Config {
   memory: MemoryConfig
   affect: AffectConfig
   proactive: ProactiveConfig
+  computerEvents: ComputerEventsConfig
   background: BackgroundConfig
   storage: StorageConfig
   cloud: CloudConfig
@@ -208,6 +223,10 @@ export const DEFAULT_CONFIG: Config = {
     },
   },
   proactive: {
+    adaptiveFrequency: true,
+    adaptiveMaxDailyLimit: 4,
+    adaptiveMinGapMinutes: 90,
+    modelInterests: [],
     opportunityThreshold: .35,
     shareSources: [],
     enabled: true,
@@ -220,6 +239,7 @@ export const DEFAULT_CONFIG: Config = {
     pauseAfterUnanswered: 1,
     maxGenerationCallsPerCandidate: 1,
   },
+  computerEvents: { enabled: false, pollSeconds: 30, idleThresholdSeconds: 1200, foregroundApplications: false, resources: true, network: true, watchDirectories: [] },
   background: {
     consolidateEveryTurns: 8,
     inputLimitTokens: 2000,
@@ -356,6 +376,7 @@ export function resolveConfig(raw: unknown = {}): Config {
   const memory = asRecord(root['memory'], 'memory')
   const affect = asRecord(root['affect'], 'affect')
   const proactive = asRecord(root['proactive'], 'proactive')
+  const computerEvents = asRecord(root['computerEvents'], 'computerEvents')
   const background = asRecord(root['background'], 'background')
   const storage = asRecord(root['storage'], 'storage')
   const cloud = asRecord(root['cloud'], 'cloud')
@@ -364,7 +385,8 @@ export function resolveConfig(raw: unknown = {}): Config {
 
   // §16.1 顶层也允许扁平写法（patch 里常直接写 generation.mode 等），
   // 这里只接受分组写法，扁平误写会被下面的「未知字段」检查抓到。
-  assertNoUnknown(root, ['personality', 'expression', 'integration', 'companion', 'generation', 'memory', 'affect', 'proactive', 'background', 'storage', 'cloud', 'observability', 'channel'], 'config')
+  assertNoUnknown(root, ['personality', 'expression', 'integration', 'companion', 'generation', 'memory', 'affect', 'proactive', 'computerEvents', 'background', 'storage', 'cloud', 'observability', 'channel'], 'config')
+  assertNoUnknown(computerEvents, ['enabled', 'pollSeconds', 'idleThresholdSeconds', 'foregroundApplications', 'resources', 'network', 'watchDirectories'], 'computerEvents')
   assertNoUnknown(cloud, ['enabled', 'syncOnStartup', 'startupTimeoutSeconds', 'autoUpload', 'intervalSeconds', 'credentialFile'], 'cloud')
   assertNoUnknown(personality, ['mix', 'overrides', 'variation'], 'personality')
   assertNoUnknown(variation, ['enabled', 'maxDelta', 'seed'], 'personality.variation')
@@ -493,6 +515,10 @@ export function resolveConfig(raw: unknown = {}): Config {
       },
     },
     proactive: {
+      adaptiveFrequency: readBool(proactive, 'adaptiveFrequency', 'proactive', true),
+      adaptiveMaxDailyLimit: readNumber(proactive, 'adaptiveMaxDailyLimit', 'proactive', 4, { min: 0, max: 24 }),
+      adaptiveMinGapMinutes: readNumber(proactive, 'adaptiveMinGapMinutes', 'proactive', 90, { min: 10, max: 1440 }),
+      modelInterests: readStringArray(proactive, 'modelInterests', 'proactive', []),
       opportunityThreshold: readNumber(proactive, 'opportunityThreshold', 'proactive', .35, { min: -1, max: 1 }),
       shareSources: readStringArray(proactive, 'shareSources', 'proactive', []),
       enabled: readBool(proactive, 'enabled', 'proactive', true),
@@ -510,6 +536,15 @@ export function resolveConfig(raw: unknown = {}): Config {
         1,
         { min: 0, max: 1 },
       ),
+    },
+    computerEvents: {
+      enabled: readBool(computerEvents, 'enabled', 'computerEvents', false),
+      pollSeconds: readNumber(computerEvents, 'pollSeconds', 'computerEvents', 30, { min: 10, max: 3600 }),
+      idleThresholdSeconds: readNumber(computerEvents, 'idleThresholdSeconds', 'computerEvents', 1200, { min: 60, max: 86400 }),
+      foregroundApplications: readBool(computerEvents, 'foregroundApplications', 'computerEvents', false),
+      resources: readBool(computerEvents, 'resources', 'computerEvents', true),
+      network: readBool(computerEvents, 'network', 'computerEvents', true),
+      watchDirectories: readStringArray(computerEvents, 'watchDirectories', 'computerEvents', []).map(path => resolvePath(path, path, 'computerEvents.watchDirectories')),
     },
     background: {
       consolidateEveryTurns: readNumber(background, 'consolidateEveryTurns', 'background', 8, { min: 1 }),
@@ -576,6 +611,9 @@ export function resolveConfig(raw: unknown = {}): Config {
   }
   try { new Intl.DateTimeFormat('en', { timeZone: config.proactive.timezone }).format(0) } catch { throw new ConfigError('proactive.timezone', '必须是有效的IANA时区') }
   if (config.proactive.shareSources.length > 4) throw new ConfigError('proactive.shareSources', '最多4个明确授权的来源')
+  if (config.computerEvents.watchDirectories.length > 8) throw new ConfigError('computerEvents.watchDirectories', '最多8个指定目录')
+  for (const [key, value] of Object.entries({ adaptiveMaxDailyLimit: config.proactive.adaptiveMaxDailyLimit, spontaneousLimitPerDay: config.proactive.spontaneousLimitPerDay, pauseAfterUnanswered: config.proactive.pauseAfterUnanswered })) if (!Number.isInteger(value)) throw new ConfigError(`proactive.${key}`, '必须是整数')
+  if (config.proactive.modelInterests.length > 20 || config.proactive.modelInterests.some(value => value.length > 80)) throw new ConfigError('proactive.modelInterests', '最多20个兴趣，每项最多80字')
   for (const address of config.proactive.shareSources) {
     try { const url = new URL(address); if (url.protocol !== 'https:' || url.username || url.password) throw new Error('invalid') } catch { throw new ConfigError('proactive.shareSources', '必须是无凭据的HTTPS网址') }
   }
@@ -620,6 +658,7 @@ export function redactConfig(config: Config): Record<string, Json> {
       retortIntensity: config.affect.retortIntensity,
     },
     proactive: { ...config.proactive },
+    computerEvents: { ...config.computerEvents },
     background: { ...config.background },
     storage: { ...config.storage },
     cloud: { ...config.cloud },

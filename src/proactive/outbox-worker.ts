@@ -20,6 +20,8 @@ import type { Repositories } from '../storage/repositories.js'
 import type { QqTransport } from '../adapters/qq-transport.js'
 import type { Metrics } from '../runtime/metrics.js'
 import { checkGates, startOfDayMs } from './candidate-builder.js'
+import { proactiveFrequency } from './frequency.js'
+import { computerEvidence } from './computer-evidence.js'
 import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
 
 export type OutboxOutcome =
@@ -193,19 +195,25 @@ export class OutboxWorker {
         if (!isReminder) {
             const conversation = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', conversationId)
             const gates = checkGates({ config, repos, conversationId, principalId: conversation?.principal_id ?? '', nowMs })
+            const frequency = proactiveFrequency(config, repos, conversation?.principal_id ?? '')
             const blocked = gates.blocked.filter(code => !['daily-limit', 'global-daily-limit', 'awaiting-reply'].includes(code))
             if (blocked.length) return blocked.join(',')
             const day = startOfDayMs(nowMs, config.proactive.timezone)
             const others = repos.db.all<Record<string, unknown>>(`SELECT * FROM outbox WHERE id <> ? AND ${SPONTANEOUS_OUTBOX} AND status IN ('sent','unknown') ORDER BY sent_at_ms DESC`, row['id'])
-            if (others.filter(other => Number(other['sent_at_ms'] ?? other['planned_at_ms']) >= day).length >= config.proactive.spontaneousLimitPerDay) return 'global-daily-limit'
+            if (others.filter(other => Number(other['sent_at_ms'] ?? other['planned_at_ms']) >= day).length >= frequency.dailyLimit) return 'global-daily-limit'
             const last = others[0]
-            if (last && nowMs - Number(last['sent_at_ms'] ?? last['planned_at_ms']) < config.proactive.spontaneousMinGapMinutes * 60000) return 'cooldown'
+            if (last && nowMs - Number(last['sent_at_ms'] ?? last['planned_at_ms']) < frequency.minGapMinutes * 60000) return 'cooldown'
             const unresolved = repos.unresolvedOutbox(conversationId, 0).filter(other => other['id'] !== row['id'] && ['sent','unknown'].includes(String(other['status'])))
             if (unresolved.length >= config.proactive.pauseAfterUnanswered) return 'awaiting-reply'
             const opportunity = str(row, 'opportunity_id')
             if (opportunity?.startsWith('op:')) {
-                const live = repos.db.get<{ status: string; expires_at_ms: number }>('SELECT status, expires_at_ms FROM proactive_opportunities WHERE id = ?', opportunity)
+                const live = repos.db.get<{ status: string; expires_at_ms: number; kind: string; principal_id: string; source_ids_json: string }>('SELECT status, expires_at_ms, kind, principal_id, source_ids_json FROM proactive_opportunities WHERE id = ?', opportunity)
                 if (!live || live.status === 'cancelled' || live.expires_at_ms <= nowMs) return 'opportunity-expired'
+                if (live.kind === 'computer_event') {
+                    if (!config.computerEvents.enabled) return 'computer-events-disabled'
+                    const sources = JSON.parse(live.source_ids_json) as string[]
+                    if (!sources.some(id => computerEvidence(repos, id, live.principal_id, conversationId, nowMs))) return 'computer-evidence-expired'
+                }
             }
         }
         return null

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
 import type { Repositories } from '../storage/repositories.js'
 import type { IdentityBinding, RawMessage } from '../domain/types.js'
+import { computerEvidence } from './computer-evidence.js'
 
-export type OpportunityKind = 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'repair' | 'reminder'
+export type OpportunityKind = 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'repair' | 'reminder' | 'computer_event'
 export function opportunityScore(scores: Record<string, number>): number {
   return (scores['relevance'] ?? 0) * .30 + (scores['novelty'] ?? .3) * .20 + (scores['continuation'] ?? scores['openness'] ?? 0) * .15 + (scores['acceptance'] ?? .5) * .15 + (scores['initiative'] ?? .5) * .10 + (scores['willingness'] ?? .5) * .10 - (scores['interruption'] ?? .5) * .35 - (scores['repetition'] ?? 0) * .25
 }
@@ -10,7 +11,7 @@ export function addOpportunity(repos: Repositories, input: { binding: IdentityBi
   if (!input.sourceIds.length || input.summary.length > 2000 || input.expiresAtMs <= input.notBeforeMs) throw new Error('Invalid opportunity evidence or window')
   for (const id of input.sourceIds) {
     const message = repos.getRawMessage(id), memory = repos.getMemory(id)
-    if (!(message && message.deletedAtMs === null && message.role === 'user' && message.conversationId === input.binding.conversationId) && !(memory && memory.principal_id === input.binding.principalId && memory.status === 'active' && memory.visibility === input.binding.visibility)) throw new Error('Opportunity evidence is deleted or outside scope')
+    if (!(message && message.deletedAtMs === null && message.role === 'user' && message.conversationId === input.binding.conversationId) && !(memory && memory.principal_id === input.binding.principalId && memory.status === 'active' && memory.visibility === input.binding.visibility) && !computerEvidence(repos, id, input.binding.principalId, input.binding.conversationId, input.nowMs)) throw new Error('Opportunity evidence is deleted or outside scope')
   }
   const topic = createHash('sha256').update(`${input.kind}:${[...input.sourceIds].sort().join(':')}:${input.topicRevision ?? ''}`).digest('hex')
   const id = `op:${input.kind}:${input.binding.principalId}:${topic}`

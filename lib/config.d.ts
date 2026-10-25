@@ -50,6 +50,10 @@ export interface AffectConfig {
     dailyAbsoluteDeltaCaps: Record<'affection' | 'trust' | 'respect' | 'grievance', number>;
 }
 export interface ProactiveConfig {
+    adaptiveFrequency: boolean;
+    adaptiveMaxDailyLimit: number;
+    adaptiveMinGapMinutes: number;
+    modelInterests: string[];
     opportunityThreshold: number;
     shareSources: string[];
     enabled: boolean;
@@ -61,6 +65,15 @@ export interface ProactiveConfig {
     spontaneousMinGapMinutes: number;
     pauseAfterUnanswered: number;
     maxGenerationCallsPerCandidate: number;
+}
+export interface ComputerEventsConfig {
+    enabled: boolean;
+    pollSeconds: number;
+    idleThresholdSeconds: number;
+    foregroundApplications: boolean;
+    resources: boolean;
+    network: boolean;
+    watchDirectories: string[];
 }
 export interface BackgroundConfig {
     consolidateEveryTurns: number;
@@ -128,6 +141,7 @@ export interface Config {
     memory: MemoryConfig;
     affect: AffectConfig;
     proactive: ProactiveConfig;
+    computerEvents: ComputerEventsConfig;
     background: BackgroundConfig;
     storage: StorageConfig;
     cloud: CloudConfig;

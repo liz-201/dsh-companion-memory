@@ -15,7 +15,7 @@
  */
 import type { Config } from '../config.js';
 import type { Repositories } from '../storage/repositories.js';
-export type CandidateKind = 'reminder' | 'open_topic' | 'repair' | 'small_talk' | 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic';
+export type CandidateKind = 'reminder' | 'open_topic' | 'repair' | 'small_talk' | 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'computer_event';
 export interface Candidate {
     /** 稳定键：同一候选重复扫描不会重复入队（outbox.candidate_key 唯一）。 */
     key: string;

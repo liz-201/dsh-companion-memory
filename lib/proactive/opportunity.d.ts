@@ -1,6 +1,6 @@
 import type { Repositories } from '../storage/repositories.js';
 import type { IdentityBinding, RawMessage } from '../domain/types.js';
-export type OpportunityKind = 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'repair' | 'reminder';
+export type OpportunityKind = 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'repair' | 'reminder' | 'computer_event';
 export declare function opportunityScore(scores: Record<string, number>): number;
 export declare function addOpportunity(repos: Repositories, input: {
     binding: IdentityBinding;

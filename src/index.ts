@@ -6,6 +6,12 @@ import { MemoryTransfer } from './cloud/memory-transfer.js'
 import { createTransferHandler } from './cloud/transfer-ui.js'
 import { installLocalIntegration } from './adapters/local-integration.js'
 import { hostService } from './adapters/host-service.js'
+import { ComputerEvents } from './runtime/computer-events.js'
+import { observeComputerEvent } from './proactive/computer-opportunities.js'
+import { buildCandidates } from './proactive/candidate-builder.js'
+import { PluginPanel } from './panel/controller.js'
+import { loadPanelSettings } from './panel/settings.js'
+import { mountPanelEntry } from './panel/entry.js'
 import { PersonaContexts } from './runtime/persona-context.js'
 import { personalityPreset } from './domain/personality.js'
 import { scheduleConsolidation, recoverConsolidationJobs } from './runtime/consolidation-scheduler.js'
@@ -126,7 +132,7 @@ export interface CompanionService {
   consumed(turnId: string): boolean
   shutdown(): Promise<void>
 }
-const VERSION = '0.3.0-dev.4'
+const VERSION = '0.3.0-dev.5'
 function logger(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
 const prefix = '[companion]'
 if (level === 'error')
@@ -156,6 +162,7 @@ if (config.memory.migrationMode === 'backup_then_migrate' && db.get("SELECT name
 migrate(db, {
  now: Date.now(), fts5: db.capabilities().fts5 })
 const repos = new Repositories(db)
+loadPanelSettings(repos, config)
 metrics.attachStorage(repos)
 const sync = new StartupSync(db, config)
 sync.importAtStartup()
@@ -167,7 +174,11 @@ for (const row of db.all<{ key: string }>("SELECT key FROM plugin_settings WHERE
 const device = registerDevice(repos)
 const owner = new OwnerIdentity(repos, config, Date.now(), device.id)
 const transfer = new MemoryTransfer(db, config, device.id)
-const transferHandler = createTransferHandler(transfer)
+let panel: PluginPanel | undefined
+const transferHandler = createTransferHandler(transfer, {
+  snapshot: input => panel?.snapshot(input) ?? { ready: false },
+  action: input => { if (!panel) throw Error('控制台正在启动。'); return panel.action(input) },
+})
 const manageUrl = (): string => {
   const web = hostService(ctx, 'webServer') as { getOrigin?: () => string } | undefined
   try { return new URL('/companion-memory/manage', web?.getOrigin?.()).href } catch { return '/companion-memory/manage' }
@@ -176,6 +187,10 @@ const firstKnownDevice = repos.db.all<{ key: string; value: string }>("SELECT ke
 const bootstrapOwnership = randomUUID()
 if (repos.db.run('INSERT OR IGNORE INTO proactive_ownership VALUES (?, ?, ?, ?, NULL)', config.companion.id, firstKnownDevice, bootstrapOwnership, '[]').changes) repos.setSetting('local.proactive.bootstrap-ownership', bootstrapOwnership, Date.now())
 const desktop = new DesktopDelivery(repos)
+const computer = new ComputerEvents({ settings: () => config.computerEvents, onEvent: event => {
+  if (!active || !transfer.isReady) return
+  try { observeComputerEvent(repos, config, event, desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean)) } catch { logger('warn', '电脑事件线索处理未完成。') }
+} })
 const personas = new PersonaContexts(repos, config)
 owner.adoptLegacyQq()
 repos.recoverOutbox()
@@ -466,6 +481,7 @@ counts: repos.counts(),
 metrics: metrics.summary(),
 background: background.stats(),
 scheduler: scheduler.running,
+computer: { settings: config.computerEvents, status: computer.status() },
 database: db.file,
 capabilities: service.compatibility().capabilities,      }
     }
@@ -564,7 +580,7 @@ const registerWeb = (context: PluginContext): (() => void) | undefined => {
 const webServer = hostService(context, 'webServer') as PluginContext['webServer']
 if (webServer && typeof
 webServer.register === 'function') {
-    return webServer.register({
+    const routeDisposer = webServer.register({
 kind: 'prefix',
 path: '/companion-memory',
 handler: (req, res) => {
@@ -590,7 +606,10 @@ const body = loopback
 response.writeHead?.(loopback ? 200 : 403, {
  'content-type': 'application/json; charset=utf-8' })
 response.end?.(body)      }
-,    })  }
+,    })
+const entryDisposer = mountPanelEntry(context, config.storage.directory, () => (webServer as unknown as { getOrigin(): string }).getOrigin())
+return () => { routeDisposer(); entryDisposer() }
+}
 return undefined
 }
 if (ctx.inject) {
@@ -601,11 +620,27 @@ if (ctx.inject) {
   webDisposer = () => { void fiber.dispose() }
 } else webDisposer = registerWeb(ctx)
 // ── 定时器 ──────────────────────────────────────────────────────────────────
+panel = new PluginPanel({ config, db, repos, owner, computer,
+  commands: { config, db, repos, retriever, updater, metrics, transfer, manageUrl, compatibility: () => service.compatibility(), scheduler: { status: () => ({ enabled: config.proactive.enabled, pending: repos.counts().outbox ?? 0, lastScanAtMs: null, nextCheckAtMs: null }), setEnabled: value => { config.proactive.enabled = value } } },
+  status: () => service.status(), activeTargets: () => desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean),
+  settingsChanged: () => { computer.stop(); computer.start(); scheduler.stop(); if (active && transfer.isReady) scheduler.start() },
+  scan: () => scheduler.scan(),
+  preview: async binding => {
+    const built = buildCandidates({ config, repos, conversationId: binding.conversationId, principalId: binding.principalId, nowMs: Date.now(), mainTurnInFlight: queue.isBusy(binding.conversationId) || desktop.isBusy(binding.conversationId) })
+    if (!built.selected) return { text: built.gate.ok ? '目前没有合适的真实话题，暂不生成草稿。' : `暂不生成：${built.gate.blocked.join('、')}` }
+    const text = await generateProactive({ candidate: built.selected, conversation: { conversationId: binding.conversationId, principalId: binding.principalId } })
+    const state = repos.getSnapshot(binding.principalId)?.snapshot
+    const candidate = repos.db.get<{ source_ids_json: string }>('SELECT source_ids_json FROM proactive_opportunities WHERE id = ?', built.selected.key)
+    const guarded = text && state ? await expression.guard(text, state, built.selected.kind === 'reminder' ? '逐字保留提醒原文' : '闲聊主动接续真实共同话题', Date.now(), undefined, candidate ? JSON.parse(candidate.source_ids_json) as string[] : []) : null
+    return { text: guarded?.text ?? '这次没有生成合适的草稿。', previewOnly: true }
+  },
+  background, review,
+})
 let outboxTimer: ReturnType<typeof setInterval> | null = null
 let backupTimer: ReturnType<typeof setInterval> | null = null
 transfer.start()
-if (transfer.isReady) { background.start(); scheduler.start() }
-else void transfer.ready.then(() => { if (active) { background.start(); scheduler.start() } })
+if (transfer.isReady) { background.start(); scheduler.start(); computer.start() }
+else void transfer.ready.then(() => { if (active) { background.start(); scheduler.start(); computer.start() } })
 outboxTimer = setInterval(() => {
 if (!transfer.isReady) return
 void outbox.runOnce().catch((error: unknown) => {
@@ -639,6 +674,7 @@ if (backupTimer !== null) {
 clearInterval(backupTimer)
 backupTimer = null    }
 scheduler.stop()
+computer.stop()
 background.stop()
 if (typeof
 commandDisposer === 'function') (commandDisposer as () => void)()

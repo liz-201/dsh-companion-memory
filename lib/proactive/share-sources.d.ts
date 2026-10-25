@@ -20,6 +20,13 @@ type ShareFetch = (url: URL, options: {
     redirect: 'error';
     signal: AbortSignal;
 }) => Promise<ShareResponse>;
+/** Parse bounded feed entries independently, so a feed heading cannot stand in for an article. */
+export declare function shareArticles(raw: string, source: URL): {
+    title: string;
+    url: string;
+    excerpt: string;
+}[];
+export declare function matchesInterest(claim: string, material: string): boolean;
 /** Only configured public URLs, bounded responses, no ambient browsing or private-file discovery. */
 export declare class ShareSources {
     private readonly repos;
