@@ -92,8 +92,8 @@ test('real Desktop loader: complete persona and suppressed contexts retain requi
     const hidden = await prompt.assemble({ agent: { id: 'internal', session: { id: 'excluded' } } })
     assert.equal(renderContextSnapshot(hidden), '')
     const other = await prompt.assemble({ agent: { id: 'other', session: { id: 'other', header: { agentPreset: 'fish' } } } })
-    assert.doesNotMatch(renderContextSnapshot(other), /喜欢蓝色/)
-    assert.match(invoke('status').text, /preset:whale/)
+    assert.match(renderContextSnapshot(other), /喜欢蓝色/, 'every host persona receives the same owner memory')
+    assert.match(invoke('status').text, /preset:whale/, 'host persona remains visible while memory is shared')
     await service.shutdown()
     await memory.dispose(); memory = undefined
     await new Promise(resolve => setImmediate(resolve))

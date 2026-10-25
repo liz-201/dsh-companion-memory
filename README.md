@@ -2,6 +2,8 @@
 
 可选：[Codex 与 DSH Desktop 直接协作桥接](docs/CODEX_BRIDGE.md)，通过本机 API 交换开发任务和结果。
 
+> **0.3.0-dev.6 修复版**：所有本人的对话、模型和宿主人设现在共用**唯一一份情感、关系、记忆、性格与交流习惯**。修复此前按人设划分记忆的问题；升级启动时先备份，再合并旧分区，导入旧记忆包也会归一。控制台的会话选择只决定操作或投递目标。详见[统一记忆修复与迁移](docs/SHARED_OWNER_MEMORY.md)。
+
 > **0.3.0-dev.5 开发版**：新增[完整插件控制台与电脑事件主动联系](docs/PLUGIN_PANEL.md)。DSH 中点击「🐟 插件控制台」即可管理本插件的记忆、情绪、性格、提醒、主动联系、导入导出、百度同步和维护。支持实际电脑事件、指定网页/RSS 兴趣分享，以及好感度和活泼性格共同调节频率。默认不启用电脑采集；升级后重启 DSH 加载新入口。
 
 > **0.3.0-dev.4 开发版**：新增[一键记忆导入导出与百度网盘同步](docs/CLOUD_MEMORY_SYNC.md)。`/fish files` 打开管理页；连接网盘后，导出自动上传，启动自动检查并合并云端记忆。全量 259 项测试，以及真实百度网盘和 DSH Desktop 重启联动验收均通过，见[验证记录](docs/CLOUD_MEMORY_VALIDATION.md)。[实施进度](docs/roadmap/v0.3/IMPLEMENTATION_PROGRESS.md)和[使用与回退](docs/roadmap/v0.3/DEV_USAGE.md)列明验证界限；真实模型盲评等门槛仍按[原实施任务书](docs/roadmap/v0.3/IMPLEMENTATION_TASKBOOK.md)执行。

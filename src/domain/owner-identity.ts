@@ -6,6 +6,7 @@ import { PRESETS, initialSnapshot } from './affect-reducer.js'
 import type { PersonaContext } from '../runtime/persona-context.js'
 import { inspectDevice } from '../runtime/device-context.js'
 import { PersonalityProfiles } from '../storage/personality-profiles.js'
+import { unifyOwnerState } from '../storage/shared-owner.js'
 
 export class OwnerIdentity {
   get ownerId(): string { return this.repos.getSetting('owner.id') ?? this.initialOwnerId }
@@ -20,15 +21,16 @@ export class OwnerIdentity {
     repos.setSetting('local.device-id', this.deviceId, nowMs)
     repos.ensureCompanion(config.companion.id, config.companion.name, PRESETS[config.companion.preset], nowMs)
     repos.ensurePrincipal(this.principalId, config.companion.id, 'owner', this.ownerId, nowMs)
+    unifyOwnerState(repos, config, this.ownerId, nowMs)
   }
 
   binding(channel: string, address: string, accountId = this.deviceId, nowMs = Date.now(), persona: PersonaContext = { id: 'builtin', preset: this.config.companion.preset }): IdentityBinding {
-    const role = persona.id === 'builtin' ? '' : `:persona:${createHash('sha256').update(persona.id).digest('hex').slice(0, 24)}`
-    const principalId = this.principalId + role
-    this.repos.ensurePrincipal(principalId, this.config.companion.id, 'owner', this.ownerId + role, nowMs)
-    if (this.repos.getSetting(`persona.id:${principalId}`) !== persona.id) this.repos.setSetting(`persona.id:${principalId}`, persona.id, nowMs)
-    const selected = this.repos.getSetting(`personality.preset:${principalId}`) ?? (role === '' ? this.repos.getSetting('companion.preset') : undefined)
-    const preset = selected === 'irritable' || selected === 'gentle' || selected === 'balanced' ? selected : persona.preset
+    const principalId = this.principalId
+    this.repos.ensurePrincipal(principalId, this.config.companion.id, 'owner', this.ownerId, nowMs)
+    // Host personas shape the current reply, but never create another memory or relationship identity.
+    if (this.repos.getSetting(`persona.id:${principalId}`) !== 'builtin') this.repos.setSetting(`persona.id:${principalId}`, 'builtin', nowMs)
+    const selected = this.repos.getSetting(`personality.preset:${principalId}`) ?? this.repos.getSetting('companion.preset')
+    const preset = selected === 'irritable' || selected === 'gentle' || selected === 'balanced' ? selected : this.config.companion.preset
     const stored = this.repos.getSnapshot(principalId)
     const marker = `personality.default:${principalId}`
     // Keep the relationship and mood intact when changing the temperament default.
@@ -39,17 +41,21 @@ export class OwnerIdentity {
       this.repos.setSetting(marker, preset, nowMs)
     }
     const profiles = new PersonalityProfiles(this.repos)
-    let profile = profiles.ensure(this.config.companion.id, persona.id, this.repos.getSnapshot(principalId)!.snapshot.personality, stored ? { mix: {}, overrides: {}, variation: { enabled: false, maxDelta: .05, seed: null } } : this.config.personality, nowMs)
+    let profile = profiles.ensure(this.config.companion.id, 'builtin', this.repos.getSnapshot(principalId)!.snapshot.personality, stored ? { mix: {}, overrides: {}, variation: { enabled: false, maxDelta: .05, seed: null } } : this.config.personality, nowMs)
     const profileMarker = `personality.profile-preset:${principalId}`
-    if (selected && this.repos.getSetting(profileMarker) !== preset) profile = profiles.configure(this.config.companion.id, persona.id, PRESETS[preset], { mix: {}, overrides: { ...profile.traits, ...PRESETS[preset] }, variation: { enabled: false, maxDelta: .05, seed: null } }, nowMs)
+    if (selected && this.repos.getSetting(profileMarker) !== preset) profile = profiles.configure(this.config.companion.id, 'builtin', PRESETS[preset], { mix: {}, overrides: { ...profile.traits, ...PRESETS[preset] }, variation: { enabled: false, maxDelta: .05, seed: null } }, nowMs)
     this.repos.setSetting(profileMarker, preset, nowMs)
     const current = this.repos.getSnapshot(principalId)!
     const legacy = Object.fromEntries(Object.keys(PRESETS[preset]).map(key => [key, profile.traits[key as keyof typeof profile.traits]])) as unknown as typeof current.snapshot.personality
     if (JSON.stringify(current.snapshot.personality) !== JSON.stringify(legacy)) this.repos.putSnapshot({ ...current.snapshot, personality: legacy, revision: current.revision + 1 }, current.revision)
-    const namespace = `${channel}:${accountId}${role}`
+    const namespace = `${channel}:${accountId}`
     this.repos.db.run('INSERT INTO identity_links(namespace, external_key, principal_id, created_at_ms) VALUES (?, ?, ?, ?) ON CONFLICT(namespace, external_key) DO NOTHING', namespace, address, principalId, nowMs)
-    const id = `owner-conv:${createHash('sha256').update(`${principalId}:${namespace}:${address}`).digest('hex').slice(0, 32)}`
+    const canonicalId = `owner-conv:${createHash('sha256').update(`${principalId}:${namespace}:${address}`).digest('hex').slice(0, 32)}`
+    // Reuse an existing channel conversation after migration so reminders and sequence guards retain their destination.
+    const existing = this.repos.db.get<{ id: string }>('SELECT c.id FROM conversations c JOIN owner_channels o ON o.conversation_id = c.id WHERE c.principal_id = ? AND o.channel = ? AND o.account_id = ? AND o.address = ? ORDER BY CASE WHEN c.id = ? THEN 0 ELSE 1 END, c.id LIMIT 1', principalId, channel, accountId, address, canonicalId)
+    const id = existing?.id ?? canonicalId
     this.repos.ensureConversation(id, principalId, 'private', `${namespace}:${address}`, nowMs)
+    this.repos.setSetting(`local.session-persona:${id}`, persona.id, nowMs)
     this.repos.db.run('INSERT INTO owner_channels(conversation_id, channel, account_id, address) VALUES (?, ?, ?, ?) ON CONFLICT(conversation_id) DO NOTHING', id, channel, accountId, address)
     return { companionId: this.config.companion.id, botAccountId: accountId, userId: this.ownerId,
       conversationId: id, conversationKind: 'private', principalId, visibility: 'private' }

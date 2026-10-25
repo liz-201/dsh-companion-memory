@@ -24,17 +24,18 @@ test('A06: repeated real contact can ease expression without awarding trust or m
   assert.deepEqual(state, before)
   assert.equal(state.relationship.trust, .5)
 })
-test('A03 / A04: profile persists through binding/restart without changing relationships or crossing roles', () => {
+test('A03 / A04: one personality and relationship persist across host personas and binding/restart', () => {
   const f = fixture({ config: { personality: options } })
   try {
     const owner = new OwnerIdentity(f.repos, f.config, f.now(), 'device')
     const a = owner.binding('dsh', 's', 'device', f.now(), { id: 'one', preset: 'balanced' })
     const before = f.repos.getSnapshot(a.principalId).snapshot
     const b = owner.binding('dsh', 's', 'device', f.now(), { id: 'two', preset: 'balanced' })
-    assert.notEqual(a.principalId, b.principalId)
+    assert.equal(a.principalId, b.principalId)
+    assert.equal(a.conversationId, b.conversationId)
     owner.binding('dsh', 's', 'device', f.now() + 10, { id: 'one', preset: 'balanced' })
     assert.deepEqual(f.repos.getSnapshot(a.principalId).snapshot, before)
-    assert.equal(f.db.get('SELECT COUNT(*) AS n FROM personality_heads').n, 2)
+    assert.equal(f.db.get('SELECT COUNT(*) AS n FROM personality_heads').n, 1)
   } finally { f.close() }
 })
 test('personality commands adjust individual traits and reject invalid updates atomically', () => {

@@ -78,7 +78,7 @@ test('local expression stays bounded, recalls explicit habits without query over
         assert.match(text, /当前心情：/)
       }
       const other = owner.binding('dsh', 'other', owner.deviceId, f.now(), { id: 'other-role', preset: 'gentle' })
-      assert.equal(interactionHabits(f.repos, other, f.now()).length, 0)
+      assert.equal(interactionHabits(f.repos, other, f.now()).length, 1, 'interaction habits are shared between windows and personas')
     } finally { dispose(); f.close() }
   }
 })

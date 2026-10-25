@@ -73,7 +73,7 @@ export class PluginPanel implements PanelControls {
       updatePanelSettings(repos, config, body['settings'], true, binding.principalId)
       if (!config.computerEvents.enabled) clearComputerEvidence(repos)
       this.options.settingsChanged()
-      return { text: '设置已保存并生效。角色兴趣仅应用于所选角色，联系频率与电脑感知设置应用于本机。' }
+      return { text: '设置已保存并生效。兴趣与情感记忆在所有对话共享；联系频率与电脑感知设置应用于本机。' }
     }
     if (action === 'computer-clear') { clearComputerEvidence(repos); return { text: '已清除本机事件线索和相关待发消息。' } }
     const binding = this.binding(typeof body['conversationId'] === 'string' ? body['conversationId'] : undefined)

@@ -68,7 +68,7 @@ export function installLocalIntegration(deps: {
   background.register('extract', async job => {
     const message = repos.getRawMessage(String(job.payload['messageId']))
     if (!message || message.role !== 'user' || message.deletedAtMs !== null) return
-    // The message's original role is authoritative even after a preset/device switch.
+    // Resolve the persisted conversation's shared owner, including after importing an older partitioned file.
     const conversation = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', message.conversationId)
     if (!conversation) return
     const binding = { companionId: config.companion.id, botAccountId: owner.deviceId, userId: owner.ownerId,
@@ -146,7 +146,10 @@ export function installLocalIntegration(deps: {
     const binding = owner.binding('dsh', id, owner.deviceId, Date.now(), persona)
     agents.set(id, agent)
     const snapshot = repos.getSnapshot(binding.principalId)
-    const memories = deps.retriever.retrieve({ binding, query: latest.get(id) ?? '', nowMs: Date.now() }).selected
+    // A new window has no query yet: seed its bounded context with shared preferences instead of a blank identity.
+    const query = latest.get(id) ?? ''
+    const memories = deps.retriever.retrieve({ binding, query: query || '用户 喜欢 偏好', nowMs: Date.now() }).selected
+      .filter(memory => query !== '' || ['fact', 'preference', 'interaction_rule'].includes(memory.row.kind))
     const projectedClaims = new Map(memories.map(memory => [memory.row.id, memory.item.claim]))
     const projected = snapshot ? projectSnapshot(snapshot.snapshot, Date.now(), config.affect) : undefined
     const stateText = projected ? (config.expression.mode === 'enforce' ? renderPlan(expression.plan(projected, latest.get(id) ?? '', Date.now())) : renderStateBlock(projected)) : ''
@@ -219,7 +222,7 @@ export function installLocalIntegration(deps: {
     if (user) latest.set(id, text)
     if (user) {
       if (!agents.has(id)) agents.set(id, { session })
-      deps.localTarget?.(session, binding, repos.getSetting(`persona.id:${binding.principalId}`) ?? 'builtin')
+    deps.localTarget?.(session, binding, personas.resolve({ session }).id)
     }
   })
   return () => { for (const dispose of disposers) dispose(); latest.clear(); agents.clear() }

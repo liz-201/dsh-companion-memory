@@ -46,7 +46,7 @@ async function setup(t) {
   return { ...f, config, owner, binding, other, panel, origin, page, call, action, changes: () => changes }
 }
 
-test('panel lists only the current owner roles, preserves role isolation and rejects cross origin or unconfirmed actions', async t => {
+test('panel shares one owner memory across conversations and rejects unowned, cross origin or unconfirmed actions', async t => {
   const f = await setup(t)
   const before = f.repos.counts()
   const state = await (await f.call('panel')).json()
@@ -61,7 +61,7 @@ test('panel lists only the current owner roles, preserves role isolation and rej
   const own = await (await f.call(`panel?conversationId=${f.binding.conversationId}`)).json()
   assert.ok(own.memories.some(row => row.claim.includes('星星')))
   const other = await (await f.call(`panel?conversationId=${f.other.conversationId}`)).json()
-  assert.equal(other.memories.length, 0)
+  assert.deepEqual(other.memories, own.memories)
   const id = own.memories[0].id
   assert.equal((await f.action('forget', { id })).status, 400)
   assert.equal(f.repos.getMemory(id).status, 'active')
@@ -78,7 +78,7 @@ test('settings take effect immediately and reload locally, invalid settings cann
   restored.proactive.modelInterests = []
   loadPanelSettings(f.repos, restored)
   assert.deepEqual(companionInterests(f.repos, restored, f.binding.principalId), ['天文'])
-  assert.deepEqual(companionInterests(f.repos, restored, f.other.principalId), [])
+  assert.deepEqual(companionInterests(f.repos, restored, f.other.principalId), ['天文'])
   const before = JSON.stringify(f.config)
   for (const settings of [{ storage: { directory: 'x' } }, { proactive: { modelInterests: ['changed'], adaptiveMaxDailyLimit: 1.5 } }, { computerEvents: { collectScreen: true } }, { proactive: { shareSources: ['file:///secret'] } }]) {
     assert.equal((await f.action('settings', { settings })).status, 400)

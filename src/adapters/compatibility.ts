@@ -98,7 +98,7 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
     id: 'agents',
     available: agentsOk,
     level: agentsOk ? 'full' : 'none',
-    detail: agentsOk ? 'ctx.agents 存在，可按 Agent 作用域安装适配' : '普通会话按事件携带的 Agent/session 隔离，QQ 按白名单绑定',
+    detail: agentsOk ? 'ctx.agents 存在，可按 Agent 作用域安装适配' : '普通会话按会话记录来源，本人所有对话共享情感记忆；QQ 按白名单绑定',
   })
   
 

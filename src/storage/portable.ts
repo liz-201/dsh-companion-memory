@@ -12,6 +12,7 @@ import { buildLexicalTerms } from '../memory/lexical-index.js'
 import { revokeDerivedSources } from '../memory/habit-learning.js'
 import { validatePersonality, TRAITS } from '../domain/personality-profile.js'
 import { suppressedBy } from '../memory/suppression.js'
+import { sharedOwnerPrincipal, unifyOwnerState } from './shared-owner.js'
 
 const TABLES: Record<string, readonly string[]> = {
   companions: ['id'], principals: ['id'], conversations: ['id'], identity_links: ['namespace', 'external_key'], owner_channels: ['conversation_id'],
@@ -372,6 +373,10 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
       db.run(`DELETE FROM ${table} WHERE ${keys.map(key => `${key} = ?`).join(' AND ')}`, ...keys.map(key => row[key])); report.deleted++
     }
     repos.setSetting('owner.id', payload.ownerId, nowMs)
+    const shared = sharedOwnerPrincipal(config, payload.ownerId)
+    repos.ensurePrincipal(shared, config.companion.id, 'owner', payload.ownerId, nowMs)
+    // An older device may still upload partitioned roles. Normalize inside this same import transaction.
+    unifyOwnerState(repos, config, payload.ownerId, nowMs, { backup: false })
     // SQLite row sequences are local to each database, never portable references.
     db.run("UPDATE conversations SET latest_inbound_seq = COALESCE((SELECT MAX(seq) FROM raw_messages WHERE conversation_id = conversations.id AND role = 'user'), 0)")
     if (!repos.getSetting('local.device-id')) repos.setSetting('local.device-id', randomUUID(), nowMs)
@@ -389,7 +394,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
       }
     }
     // Keep the imported snapshot exactly for a fresh/fast-forward restore. Rebuild only divergent projections.
-    for (const principal of new Set([...(populated ? rebuild : []), ...deletionRebuild])) {
+    for (const principal of new Set([...(populated ? rebuild : []), ...deletionRebuild].map(id => repos.getSetting(`identity.shared-alias:${id}`) ?? id))) {
       const stored = repos.getSnapshot(principal)
       const snapshot = rebuildAffect(repos, config, principal, nowMs)
       repos.putSnapshot(snapshot, stored?.revision ?? 0)

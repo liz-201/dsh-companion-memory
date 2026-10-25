@@ -32,7 +32,7 @@ test('balanced default upgrades implicit irritability without erasing relationsh
   } finally { f.close() }
 })
 
-test('host preset changes isolate memories, queued observations and personality; returning and copying restore each role', async () => {
+test('host preset changes and copied devices use one shared memory, queued observations and personality', async () => {
   const f = fixture({ config: { integration: { personaPresets: { 'preset:whale': 'gentle' } } } }), other = fixture()
   const owner = new OwnerIdentity(f.repos, f.config, f.now(), 'A')
   const personas = new PersonaContexts(f.repos, f.config)
@@ -48,19 +48,20 @@ test('host preset changes isolate memories, queued observations and personality;
   const command = (binding, raw) => handleFishCommand({ binding, raw, isOwner: true, nowMs: f.now() }, { config: f.config, repos: f.repos, db: f.db, retriever: f.retriever, updater: f.updater, metrics: f.metrics })
   try {
     const whale = binding()
-    assert.deepEqual(f.repos.getSnapshot(whale.principalId).snapshot.personality, PRESETS.gentle)
+    assert.deepEqual(f.repos.getSnapshot(whale.principalId).snapshot.personality, PRESETS.balanced)
     const message = { id: 'm1', source: { kind: 'user' }, content: [{ type: 'text', text: '谢谢你，我喜欢蓝色' }] }
     listeners.get('session/event')(session, { type: 'user/message', seq: 1, time: f.now(), surfaceOp: 'append', data: message })
     events.push({ type: 'agent-preset/selected', data: { agentPreset: 'fish' } })
     const fish = binding()
-    assert.notEqual(fish.principalId, whale.principalId)
+    assert.equal(fish.principalId, whale.principalId)
+    assert.equal(fish.conversationId, whale.conversationId)
     await background.tick(Date.now() + 10000)
     assert.equal(f.repos.activeAffectEvents(whale.principalId).length, 1)
-    assert.equal(f.repos.activeAffectEvents(fish.principalId).length, 0)
+    assert.equal(f.repos.activeAffectEvents(fish.principalId).length, 1)
     assert.match(command(whale, 'memory 蓝色').text, /喜欢蓝色/)
-    assert.match(command(fish, 'memory 蓝色').text, /没搜到/)
+    assert.match(command(fish, 'memory 蓝色').text, /喜欢蓝色/)
     assert.equal(command(whale, 'personality irritable').kind, 'success')
-    assert.deepEqual(f.repos.getSnapshot(fish.principalId).snapshot.personality, PRESETS.balanced)
+    assert.deepEqual(f.repos.getSnapshot(fish.principalId).snapshot.personality, PRESETS.irritable)
     events.push({ type: 'agent-preset/selected', data: { agentPreset: 'whale' } })
     assert.equal(binding().principalId, whale.principalId)
     assert.deepEqual(f.repos.getSnapshot(whale.principalId).snapshot.personality, PRESETS.irritable)

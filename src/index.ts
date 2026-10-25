@@ -132,7 +132,7 @@ export interface CompanionService {
   consumed(turnId: string): boolean
   shutdown(): Promise<void>
 }
-const VERSION = '0.3.0-dev.5'
+const VERSION = '0.3.0-dev.6'
 function logger(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
 const prefix = '[companion]'
 if (level === 'error')
@@ -475,6 +475,7 @@ device,
 sync: { directory: sync.directory, imports: sync.reports, lastExport: sync.lastExport, cloud: transfer.status(), manageUrl: manageUrl() },
 expression: { mode: config.expression.mode, supportedProtocol: 'desktop-0.2.1-rc.2', qualityVerified: false },
 integration: { ...config.integration, hooksAvailable: typeof ctx.on === 'function', ownerId: owner.ownerId },
+memoryScope: { mode: 'shared-owner', principalId: owner.principalId, migration: repos.getSetting('local.shared-owner.report') ? JSON.parse(repos.getSetting('local.shared-owner.report')!) : null },
 delivery: transport.configured ? 'bridge' : 'plain-body-only',
 chats: chatByConversation.size,
 counts: repos.counts(),
@@ -542,7 +543,7 @@ if (!chatId) {
   if (!config.integration.enabled || !config.integration.localOwner || !sessionId || config.integration.excludedAgentIds.includes(String(agent['id']))) return { kind: 'error', text: '当前会话没有启用本地主人记忆。' }
   const persona = personas.resolve(agent)
   const result = handleFishCommand({ raw: rawInput, binding: owner.binding('dsh', sessionId, owner.deviceId, Date.now(), persona), isOwner: true, nowMs: Date.now() }, { config, repos, db, retriever, updater, metrics, transfer, manageUrl, publishLocal: () => publish() ? sync.lastExport : null })
-  if (rawInput.trim() === 'status') result.text += `\n当前角色：${persona.id}`
+  if (rawInput.trim() === 'status') result.text += `\n记忆模式：所有本人对话共享同一份情感记忆\n当前角色：${persona.id}`
   if (rawInput.trim() === 'status') result.text += `\n${device.text}\n同步目录：${sync.directory}\n启动同步：${sync.reports.filter(report => !report.error).length} 份；失败 ${sync.reports.filter(report => report.error).length} 份；冲突 ${sync.reports.reduce((sum, report) => sum + (report.conflicts ?? 0), 0)} 条`
   return result
 }
