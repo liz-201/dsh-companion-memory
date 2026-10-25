@@ -10,6 +10,8 @@
  * 这里**不宣称**达标，只负责把实测值算出来给 bench/doctor 报告。
  */
 
+import type { Repositories } from '../storage/repositories.js'
+
 export type Phase =
   | 'assembly'
   | 'retrieval'
@@ -78,6 +80,16 @@ export class Metrics {
   private readonly counters = new Map<string, number>()
   private readonly degraded = new Set<string>()
   private readonly limit: number
+  private repos: Repositories | undefined
+
+  /** Daily counters survive restarts; timing samples remain a bounded in-memory window. */
+  attachStorage(repos: Repositories): void {
+    this.repos = repos
+    const prefix = `metrics.daily:${new Date().toISOString().slice(0, 10)}:`
+    for (const row of repos.db.all<{ key: string; value: string }>('SELECT key, value FROM plugin_settings WHERE key LIKE ?', `${prefix}%`)) {
+      this.counters.set(row.key.slice(prefix.length), Number(row.value))
+    }
+  }
 
   /** cap 防止长跑进程无限增长；超出后丢最旧的样本（计数器不受影响）。 */
   constructor(limit = 5000) {
@@ -98,11 +110,22 @@ export class Metrics {
 
   count(name: string, delta = 1): void {
     this.counters.set(name, (this.counters.get(name) ?? 0) + delta)
+    if (!this.repos?.db.isOpen) return
+    try {
+      const now = Date.now(), key = `metrics.daily:${new Date(now).toISOString().slice(0, 10)}:${name}`
+      this.repos.db.run('INSERT INTO plugin_settings (key, value, updated_at_ms) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = CAST(value AS REAL) + ?, updated_at_ms = excluded.updated_at_ms', key, String(delta), now, delta)
+    } catch { this.degraded.add('指标持久化失败') }
   }
 
   /** 降级原因去重记录，doctor 与 /fish status 直接展示。 */
   degrade(reason: string): void {
     this.degraded.add(reason)
+    if (this.degraded.size > 100) this.degraded.delete(this.degraded.values().next().value!)
+    if (!this.repos?.db.isOpen) return
+    try {
+      this.repos.audit({ principalId: null, kind: 'runtime-degraded', entityId: null,
+        payload: { reason: reason.slice(0, 1200) }, createdAtMs: Date.now() })
+    } catch { this.degraded.add('诊断审计持久化失败') }
   }
 
   stats(): PhaseStat[] {

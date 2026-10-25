@@ -87,6 +87,7 @@ export function migrate(db: Database, options: MigrateOptions): MigrationResult 
 
   const result: MigrationResult = { applied: [], skipped: [], ftsCreated: false, warnings: [] }
 
+  db.transaction(() => {
   for (const file of files) {
     const existing = applied.get(file.version)
     if (existing !== undefined) {
@@ -115,6 +116,7 @@ export function migrate(db: Database, options: MigrateOptions): MigrationResult 
     result.applied.push(file.version)
     if (file.name.includes('_fts')) result.ftsCreated = true
   }
+  })
 
   return result
 }

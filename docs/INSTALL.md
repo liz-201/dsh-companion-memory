@@ -52,7 +52,7 @@ $env:ELECTRON_RUN_AS_NODE='1'
     companion:
       id: blue-fish-main
       name: 大肥鱼
-      preset: irritable        # irritable | balanced | gentle
+      preset: balanced         # 默认均衡；irritable | balanced | gentle
       scope: owner_private     # owner_private | owner_all
     channel:
       ownerChats: ["private:2940015320"]
@@ -62,7 +62,7 @@ $env:ELECTRON_RUN_AS_NODE='1'
     proactive:
       enabled: false           # 打开前先确认 ownerChats 与协议端都在
     generation:
-      liveModelCalls: true
+      liveModelCalls: 1
 ```
 
 所有字段与默认值见 `src/config.ts` 的 `DEFAULT_CONFIG`。写错字段会在启动时抛
@@ -93,3 +93,10 @@ $env:ELECTRON_RUN_AS_NODE='1'
 
 `link:` 安装下重新构建即生效；重启桌面端让 loader 重新加载 `lib/`。
 数据库迁移由插件启动时按版本号顺序应用，只前进不回退（回滚见 ROLLBACK）。
+# 普通 DSH 与跨电脑同步
+
+0.2.0 安装后普通 DSH 会话默认启用记忆和情感，不要求连接 QQ。使用 `/fish sync` 导出可拷贝的同步文件；新电脑启动自动导入。网盘目录配置和迁移步骤见 [SYNC.md](SYNC.md)。
+
+角色隔离、完整提示词预设和情感参数配置见 [PERSONA_CONTINUITY.md](PERSONA_CONTINUITY.md)。
+
+dev.4 可用 `/fish files` 打开记忆管理页，直接导入导出完整文件并连接百度网盘。首次设置见 [CLOUD_MEMORY_SYNC.md](CLOUD_MEMORY_SYNC.md)。更新后需重新加载 profile 或重启桌面端。

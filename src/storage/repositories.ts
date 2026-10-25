@@ -23,6 +23,7 @@ import type {
   Visibility,
 } from '../domain/types.js'
 import { escapeLike, tokensToMatchQuery } from '../memory/normalizer.js'
+import { SPONTANEOUS_OUTBOX } from './outbox-policy.js'
 
 const json = (value: unknown): string => JSON.stringify(value)
 const parse = <T>(text: unknown, fallback: T): T => {
@@ -943,7 +944,7 @@ export class Repositories {
   /** 日限额与冷却：某会话在 [sinceMs, now] 内已发/在途的主动消息数。 */
   countOutboxSince(conversationId: string, sinceMs: number): number {
     const row = this.db.get<{ n: number }>(
-      "SELECT COUNT(*) AS n FROM outbox WHERE conversation_id = ? AND turn_id IS NULL AND task_id IS NULL AND planned_at_ms >= ? AND status IN ('pending','sending','sent','unknown')",
+      `SELECT COUNT(*) AS n FROM outbox WHERE conversation_id = ? AND ${SPONTANEOUS_OUTBOX} AND planned_at_ms >= ? AND status IN ('pending','sending','sent','unknown')`,
       conversationId,
       sinceMs,
     )
@@ -953,7 +954,7 @@ export class Repositories {
   /** 有过期未确认的主动消息（用于「未回复就暂停」判定，§14.2）。 */
   unresolvedOutbox(conversationId: string, sinceMs: number): Row[] {
     return this.db.all<Row>(
-      `SELECT * FROM outbox WHERE conversation_id = ? AND turn_id IS NULL AND task_id IS NULL AND planned_at_ms >= ?
+      `SELECT * FROM outbox WHERE conversation_id = ? AND ${SPONTANEOUS_OUTBOX} AND planned_at_ms >= ?
        AND status IN ('pending','sending','sent','unknown')
        AND NOT EXISTS (SELECT 1 FROM raw_messages r WHERE r.conversation_id = outbox.conversation_id AND r.role = 'user' AND r.observed_at_ms > COALESCE(outbox.sent_at_ms, outbox.planned_at_ms))
        ORDER BY planned_at_ms`,
@@ -1020,11 +1021,20 @@ export class Repositories {
     return result.changes > 0
   }
 
+  /**
+   * 领任务。租约已过期的行视为孤儿（进程崩在 handler 里，没人来 finishJob），
+   * 重新参与认领——否则崩溃留下的 'leased' 行永远不再执行，而整理调度会把
+   * 它当成「已在排队」，让该会话的整理任务永久停摆。
+   * 只回收已过期的行，绝不抢另一个活进程正在跑的任务。
+   */
   claimJobs(nowMs: number, leaseMs: number, limit: number): Row[] {
     return this.db.transaction(() => {
       const rows = this.db.all<Row>(
-        `SELECT * FROM background_jobs WHERE status = 'pending' AND available_at_ms <= ?
+        `SELECT * FROM background_jobs
+         WHERE available_at_ms <= ?
+           AND (status = 'pending' OR (status = 'leased' AND (lease_until_ms IS NULL OR lease_until_ms <= ?)))
          ORDER BY available_at_ms LIMIT ?`,
+        nowMs,
         nowMs,
         limit,
       )
@@ -1034,13 +1044,55 @@ export class Repositories {
           nowMs + leaseMs,
           row['id'],
         )
+        // 返回自增后的 attempts：它就是这次租约的令牌，后续续租/回写都要带上它。
+        row['attempts'] = Number(row['attempts'] ?? 0) + 1
       }
       return rows
     })
   }
 
-  finishJob(id: string, status: 'done' | 'failed' | 'cancelled', error?: string): void {
-    this.db.run('UPDATE background_jobs SET status = ?, last_error = ? WHERE id = ?', status, error ?? null, id)
+  /**
+   * 续租。只有「这一行仍是 leased 且 attempts 还是我这次领到的值」才算成功；
+   * 租约被别的 worker 重领后 attempts 已变，这里返回 false，调用方必须停手。
+   */
+  renewJobLease(id: string, attempts: number, nowMs: number, leaseMs: number): boolean {
+    return this.db.run(
+      "UPDATE background_jobs SET lease_until_ms = ? WHERE id = ? AND status = 'leased' AND attempts = ?",
+      nowMs + leaseMs,
+      id,
+      attempts,
+    ).changes === 1
+  }
+
+  /**
+   * 失败重排。同样带 id + status='leased' + attempts 条件，旧 worker 不能把
+   * 新 worker 正在跑的行改回 pending。
+   */
+  retryJob(id: string, attempts: number, availableAtMs: number, error: string): boolean {
+    return this.db.run(
+      "UPDATE background_jobs SET status = 'pending', lease_until_ms = NULL, available_at_ms = ?, last_error = ? WHERE id = ? AND status = 'leased' AND attempts = ?",
+      availableAtMs,
+      error,
+      id,
+      attempts,
+    ).changes === 1
+  }
+
+  /**
+   * 收尾。传 attempts 时按租约条件更新，返回是否真的由本次执行写成；
+   * 不传 attempts 时保留旧的「无条件写」语义（供外部/测试直接改状态）。
+   */
+  finishJob(id: string, status: 'done' | 'failed' | 'cancelled', error?: string, attempts?: number): boolean {
+    if (attempts === undefined) {
+      return this.db.run('UPDATE background_jobs SET status = ?, last_error = ?, lease_until_ms = NULL WHERE id = ?', status, error ?? null, id).changes === 1
+    }
+    return this.db.run(
+      "UPDATE background_jobs SET status = ?, last_error = ?, lease_until_ms = NULL WHERE id = ? AND status = 'leased' AND attempts = ?",
+      status,
+      error ?? null,
+      id,
+      attempts,
+    ).changes === 1
   }
 
   jobStats(): Record<string, number> {

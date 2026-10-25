@@ -291,8 +291,28 @@ export declare class Repositories {
         availableAtMs: number;
         createdAtMs: number;
     }): boolean;
+    /**
+     * 领任务。租约已过期的行视为孤儿（进程崩在 handler 里，没人来 finishJob），
+     * 重新参与认领——否则崩溃留下的 'leased' 行永远不再执行，而整理调度会把
+     * 它当成「已在排队」，让该会话的整理任务永久停摆。
+     * 只回收已过期的行，绝不抢另一个活进程正在跑的任务。
+     */
     claimJobs(nowMs: number, leaseMs: number, limit: number): Row[];
-    finishJob(id: string, status: 'done' | 'failed' | 'cancelled', error?: string): void;
+    /**
+     * 续租。只有「这一行仍是 leased 且 attempts 还是我这次领到的值」才算成功；
+     * 租约被别的 worker 重领后 attempts 已变，这里返回 false，调用方必须停手。
+     */
+    renewJobLease(id: string, attempts: number, nowMs: number, leaseMs: number): boolean;
+    /**
+     * 失败重排。同样带 id + status='leased' + attempts 条件，旧 worker 不能把
+     * 新 worker 正在跑的行改回 pending。
+     */
+    retryJob(id: string, attempts: number, availableAtMs: number, error: string): boolean;
+    /**
+     * 收尾。传 attempts 时按租约条件更新，返回是否真的由本次执行写成；
+     * 不传 attempts 时保留旧的「无条件写」语义（供外部/测试直接改状态）。
+     */
+    finishJob(id: string, status: 'done' | 'failed' | 'cancelled', error?: string, attempts?: number): boolean;
     jobStats(): Record<string, number>;
     insertTombstone(input: {
         id: string;

@@ -10,6 +10,10 @@
 
 import type { Database } from './database.js'
 import type { Repositories } from './repositories.js'
+import { revokeDerivedSources } from '../memory/habit-learning.js'
+import type { Config } from '../config.js'
+import { rebuildAffect } from '../domain/affect-projector.js'
+import { memoryFingerprint, suppressedBy, type MemorySuppression } from '../memory/suppression.js'
 
 export type DeleteSelector =
   | { kind: 'memory'; memoryId: string }
@@ -36,12 +40,17 @@ export function deleteScope(
   selector: DeleteSelector,
   nowMs: number,
   backupKeepDays: number,
+  config?: Config,
 ): DeleteResult {
+  if (selector.kind === 'message' && db.get<{ principal_id: string }>('SELECT c.principal_id FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE r.id = ?', selector.messageId)?.principal_id !== principalId) throw new Error('消息不属于当前角色')
+  if ((selector.kind === 'message' || selector.kind === 'all') && !config) throw new Error('删除原话需要提供当前配置以重建情感投影')
   const removedMemories: string[] = []
   const removedMessages: string[] = []
+  const suppressed: MemorySuppression[] = []
   let retracted = 0
   let clearedCheckpoints = 0
   let cancelledTasks = 0
+  const tombstoneId = `tb_${nowMs}_${Math.random().toString(36).slice(2, 8)}`
 
   db.transaction(() => {
     const memoryIds = new Set<string>()
@@ -75,6 +84,7 @@ export function deleteScope(
     for (const memoryId of memoryIds) {
       const row = repos.getMemory(memoryId)
       if (row === undefined || row.principal_id !== principalId) continue
+      suppressed.push({ id: memoryId, claimHash: memoryFingerprint(row.claim), objectHash: row.object_json === null ? null : memoryFingerprint(JSON.parse(row.object_json)), sourceIds: repos.memoryEvidence(memoryId).map(item => item.messageId) })
       db.run('DELETE FROM memory_evidence WHERE memory_id = ?', memoryId)
       db.run('DELETE FROM memory_edges WHERE from_id = ? OR to_id = ?', memoryId, memoryId)
       db.run('DELETE FROM memories WHERE id = ?', memoryId)
@@ -84,7 +94,7 @@ export function deleteScope(
 
     for (const messageId of removedMessages) {
       db.run('DELETE FROM memory_evidence WHERE message_id = ?', messageId)
-      db.run('UPDATE raw_messages SET deleted_at_ms = ? WHERE id = ? AND deleted_at_ms IS NULL', nowMs, messageId)
+      db.run("UPDATE raw_messages SET content = '', deleted_at_ms = ? WHERE id = ? AND deleted_at_ms IS NULL", nowMs, messageId)
     }
 
     // 情感影响：把相关事件标 retracted，由后续重投影计算当前状态。
@@ -93,9 +103,11 @@ export function deleteScope(
       const result = db.run(
         `UPDATE affect_events SET status = 'retracted'
          WHERE principal_id = ?
-           AND appraisal_id IN (SELECT id FROM appraisals WHERE source_message_id IN (${placeholders}))
+           AND (appraisal_id IN (SELECT id FROM appraisals WHERE source_message_id IN (${placeholders}))
+             OR json_extract(payload_json, '$.appraisal.sourceMessageId') IN (${placeholders}))
            AND status = 'active'`,
         principalId,
+        ...removedMessages,
         ...removedMessages,
       )
       retracted += result.changes
@@ -109,10 +121,15 @@ export function deleteScope(
       db.run("UPDATE relationship_episodes SET status = 'archived' WHERE id = ?", selector.episodeId)
     }
 
+    revokeDerivedSources(repos, [...removedMemories, ...removedMessages])
+    if (retracted > 0 && config) {
+      const stored = repos.getSnapshot(principalId)
+      repos.putSnapshot(rebuildAffect(repos, config, principalId, nowMs), stored?.revision ?? 0)
+    }
     repos.insertTombstone({
-      id: `tb_${nowMs}_${Math.random().toString(36).slice(2, 8)}`,
+      id: tombstoneId,
       principalId,
-      selector,
+      selector: { ...selector, suppressed },
       affectedIds: [...removedMemories, ...removedMessages],
       createdAtMs: nowMs,
     })
@@ -130,13 +147,8 @@ export function deleteScope(
     })
   })
 
-  const tombstone = db.get<{ id: string }>(
-    'SELECT id FROM deletion_tombstones WHERE principal_id = ? ORDER BY created_at_ms DESC LIMIT 1',
-    principalId,
-  )
-
   return {
-    tombstoneId: String(tombstone?.id ?? ''),
+    tombstoneId,
     removedMemories,
     removedMessages,
     retractedAffectEvents: retracted,
@@ -150,9 +162,10 @@ export function deleteScope(
 }
 
 /** 恢复备份后调用：把 tombstone 里记录过的行再次清掉。 */
-export function replayTombstones(db: Database, repos: Repositories, nowMs: number): { replayed: number; removedMemories: number } {
+export function replayTombstones(db: Database, repos: Repositories, nowMs: number, config?: Config): { replayed: number; removedMemories: number } {
   let replayed = 0
   let removedMemories = 0
+  const rebuild = new Set<string>()
   for (const row of repos.listTombstones()) {
     const selectorJson = String(row['selector_json'] ?? '{}')
     let selector: DeleteSelector | undefined
@@ -170,19 +183,27 @@ export function replayTombstones(db: Database, repos: Repositories, nowMs: numbe
       ids = []
     }
     db.transaction(() => {
+      const principalId = String(row['principal_id'])
+      for (const memory of db.all<{ id: string; claim: string; object_json: string | null }>('SELECT id, claim, object_json FROM memories WHERE principal_id = ?', principalId)) if (suppressedBy(selectorJson, { id: memory.id, claim: memory.claim, object: memory.object_json === null ? null : JSON.parse(memory.object_json), sourceIds: repos.memoryEvidence(memory.id).map(item => item.messageId) })) ids.push(memory.id)
+      revokeDerivedSources(repos, ids)
       for (const id of ids) {
-        if (id.startsWith('mem_')) {
+        if (repos.getMemory(id)?.principal_id === principalId) {
           repos.removeFromIndex(id)
           db.run('DELETE FROM memory_evidence WHERE memory_id = ?', id)
           db.run('DELETE FROM memory_edges WHERE from_id = ? OR to_id = ?', id, id)
           const result = db.run('DELETE FROM memories WHERE id = ?', id)
           removedMemories += result.changes
         } else {
-          db.run('UPDATE raw_messages SET deleted_at_ms = ? WHERE id = ? AND deleted_at_ms IS NULL', nowMs, id)
+          db.run("UPDATE raw_messages SET content = '', deleted_at_ms = ? WHERE id = ? AND deleted_at_ms IS NULL AND conversation_id IN (SELECT id FROM conversations WHERE principal_id = ?)", nowMs, id, principalId)
+          if (db.run("UPDATE affect_events SET status = 'retracted' WHERE principal_id = ? AND status = 'active' AND json_extract(payload_json, '$.appraisal.sourceMessageId') = ?", principalId, id).changes > 0) rebuild.add(principalId)
         }
       }
     })
     replayed += 1
+  }
+  for (const principalId of rebuild) {
+    if (config) { const stored = repos.getSnapshot(principalId); repos.putSnapshot(rebuildAffect(repos, config, principalId, nowMs), stored?.revision ?? 0) }
+    else repos.setSetting(`local.affect-rebuild:${principalId}`, '1', nowMs)
   }
   return { replayed, removedMemories }
 }

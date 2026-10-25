@@ -46,7 +46,7 @@ export function fixture(options = {}) {
       if (event) yield { text: `<evt>${JSON.stringify({ v: 1, e: [event] })}</evt>` }
     },
   })
-  return { config, directory, db, repos, updater, retriever, metrics, ledger, binding, requests, sends,
+  return { config, directory, db, repos, updater, retriever, metrics, ledger, coordinator, binding, requests, sends,
     now: () => now, advance: ms => { now += ms }, snapshot: () => repos.getSnapshot('p')?.snapshot,
     turn: (text = '测试输入', extra = {}) => coordinator.handleInbound({ binding, chatId: 'private:123', text, platformMessageKey: `in-${sequence++}`, occurredAtMs: now, observedAtMs: now, sessionId: 'session', ...extra }),
     command: raw => handleFishCommand({ raw, binding, isOwner: true, nowMs: now }, { config, db, repos, updater, retriever, metrics }),

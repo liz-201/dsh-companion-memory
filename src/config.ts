@@ -7,6 +7,8 @@
 
 import { homedir } from 'node:os'
 import { join, isAbsolute, resolve } from 'node:path'
+import { validatePersonality, type PersonalityOptions } from './domain/personality-profile.js'
+import { MIN_EXPRESSION_BUDGET } from './expression/policy.js'
 
 export type PresetId = 'irritable' | 'balanced' | 'gentle'
 export type CompanionScope = 'owner_private' | 'owner_all'
@@ -58,6 +60,8 @@ export interface AffectConfig {
 }
 
 export interface ProactiveConfig {
+  opportunityThreshold: number
+  shareSources: string[]
   enabled: boolean
   timezone: string
   quietStart: string
@@ -80,9 +84,20 @@ export interface BackgroundConfig {
 
 export interface StorageConfig {
   directory: string
+  transferDirectory: string
+  syncIntervalSeconds: number
   backupDaily: boolean
   backupRetentionDays: number
   busyTimeoutMs: number
+}
+
+export interface CloudConfig {
+  enabled: boolean
+  syncOnStartup: boolean
+  startupTimeoutSeconds: number
+  autoUpload: boolean
+  intervalSeconds: number
+  credentialFile: string
 }
 
 export interface ObservabilityConfig {
@@ -104,14 +119,20 @@ export interface ChannelConfig {
 }
 
 export interface IntegrationConfig {
+  naturalExpression: boolean
   enabled: boolean
   mode: 'augment' | 'standalone'
   localOwner: boolean
   excludedAgentIds: string[]
   contextBudgetTokens: number
+  /** Stable role override; empty follows the host preset or persona text. */
+  personaId: string
+  personaPresets: Record<string, PresetId>
 }
 
 export interface Config {
+  personality: PersonalityOptions
+  expression: { mode: 'enforce' | 'diagnostic'; repairMaxCallsPerTurn: number; repairMaxCallsPerDay: number; historyTurns: number; auditRetentionDays: number }
   integration: IntegrationConfig
   companion: CompanionConfig
   generation: GenerationConfig
@@ -120,6 +141,7 @@ export interface Config {
   proactive: ProactiveConfig
   background: BackgroundConfig
   storage: StorageConfig
+  cloud: CloudConfig
   observability: ObservabilityConfig
   channel: ChannelConfig
 }
@@ -130,11 +152,13 @@ export function dshHome(): string {
 }
 
 export const DEFAULT_CONFIG: Config = {
-  integration: { enabled: true, mode: 'augment', localOwner: true, excludedAgentIds: [], contextBudgetTokens: 450 },
+  personality: { mix: {}, overrides: {}, variation: { enabled: false, maxDelta: .05, seed: null } },
+  expression: { mode: 'enforce', repairMaxCallsPerTurn: 1, repairMaxCallsPerDay: 10, historyTurns: 10, auditRetentionDays: 30 },
+  integration: { enabled: true, naturalExpression: true, mode: 'augment', localOwner: true, excludedAgentIds: [], contextBudgetTokens: 450, personaId: '', personaPresets: {} },
   companion: {
     id: 'blue-fish-main',
     name: '蓝色大肥鱼',
-    preset: 'irritable',
+    preset: 'balanced',
     scope: 'owner_private',
   },
   generation: {
@@ -184,6 +208,8 @@ export const DEFAULT_CONFIG: Config = {
     },
   },
   proactive: {
+    opportunityThreshold: .35,
+    shareSources: [],
     enabled: true,
     timezone: 'Asia/Shanghai',
     quietStart: '23:00',
@@ -195,7 +221,7 @@ export const DEFAULT_CONFIG: Config = {
     maxGenerationCallsPerCandidate: 1,
   },
   background: {
-    consolidateEveryTurns: 25,
+    consolidateEveryTurns: 8,
     inputLimitTokens: 2000,
     outputLimitTokens: 200,
     maxConcurrentJobs: 1,
@@ -204,10 +230,13 @@ export const DEFAULT_CONFIG: Config = {
   },
   storage: {
     directory: join(dshHome(), 'companions'),
+    transferDirectory: '',
+    syncIntervalSeconds: 300,
     backupDaily: true,
     backupRetentionDays: 7,
     busyTimeoutMs: 1000,
   },
+  cloud: { enabled: false, syncOnStartup: true, startupTimeoutSeconds: 15, autoUpload: true, intervalSeconds: 300, credentialFile: '' },
   observability: {
     includeMessageContentByDefault: false,
     retainProviderUsage: true,
@@ -318,6 +347,9 @@ const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
  */
 export function resolveConfig(raw: unknown = {}): Config {
   const root = asRecord(raw, 'config')
+  const personality = asRecord(root['personality'], 'personality')
+  const variation = asRecord(personality['variation'], 'personality.variation')
+  const expression = asRecord(root['expression'], 'expression')
   const integration = asRecord(root['integration'], 'integration')
   const companion = asRecord(root['companion'], 'companion')
   const generation = asRecord(root['generation'], 'generation')
@@ -326,12 +358,23 @@ export function resolveConfig(raw: unknown = {}): Config {
   const proactive = asRecord(root['proactive'], 'proactive')
   const background = asRecord(root['background'], 'background')
   const storage = asRecord(root['storage'], 'storage')
+  const cloud = asRecord(root['cloud'], 'cloud')
   const observability = asRecord(root['observability'], 'observability')
   const channel = asRecord(root['channel'], 'channel')
 
   // §16.1 顶层也允许扁平写法（patch 里常直接写 generation.mode 等），
   // 这里只接受分组写法，扁平误写会被下面的「未知字段」检查抓到。
-  assertNoUnknown(root, ['integration', 'companion', 'generation', 'memory', 'affect', 'proactive', 'background', 'storage', 'observability', 'channel'], 'config')
+  assertNoUnknown(root, ['personality', 'expression', 'integration', 'companion', 'generation', 'memory', 'affect', 'proactive', 'background', 'storage', 'cloud', 'observability', 'channel'], 'config')
+  assertNoUnknown(cloud, ['enabled', 'syncOnStartup', 'startupTimeoutSeconds', 'autoUpload', 'intervalSeconds', 'credentialFile'], 'cloud')
+  assertNoUnknown(personality, ['mix', 'overrides', 'variation'], 'personality')
+  assertNoUnknown(variation, ['enabled', 'maxDelta', 'seed'], 'personality.variation')
+  assertNoUnknown(expression, ['mode', 'repairMaxCallsPerTurn', 'repairMaxCallsPerDay', 'historyTurns', 'auditRetentionDays'], 'expression')
+  const personalityOptions: PersonalityOptions = {
+    mix: asRecord(personality['mix'], 'personality.mix') as Record<string, number>,
+    overrides: asRecord(personality['overrides'], 'personality.overrides'),
+    variation: { enabled: readBool(variation, 'enabled', 'personality.variation', false), maxDelta: readNumber(variation, 'maxDelta', 'personality.variation', .05, { min: 0, max: .05 }), seed: variation['seed'] === null || variation['seed'] === undefined ? null : readString(variation, 'seed', 'personality.variation', '') },
+  }
+  try { validatePersonality(personalityOptions) } catch (error) { throw new ConfigError('personality', String(error)) }
 
   const halfLife = asRecord(affect['halfLifeMinutes'], 'affect.halfLifeMinutes')
   const caps = asRecord(affect['dailyAbsoluteDeltaCaps'], 'affect.dailyAbsoluteDeltaCaps')
@@ -342,12 +385,25 @@ export function resolveConfig(raw: unknown = {}): Config {
   if (!TIME_RE.test(quietEnd)) throw new ConfigError('proactive.quietEnd', '必须是 HH:mm')
 
   const config: Config = {
+    personality: personalityOptions,
+    expression: {
+      mode: readEnum(expression, 'mode', 'expression', integration['naturalExpression'] === false ? 'diagnostic' : 'enforce', ['enforce', 'diagnostic'] as const),
+      repairMaxCallsPerTurn: readNumber(expression, 'repairMaxCallsPerTurn', 'expression', 1, { min: 0, max: 1 }),
+      repairMaxCallsPerDay: readNumber(expression, 'repairMaxCallsPerDay', 'expression', 10, { min: 0, max: 100 }),
+      historyTurns: readNumber(expression, 'historyTurns', 'expression', 10, { min: 1, max: 50 }),
+      auditRetentionDays: readNumber(expression, 'auditRetentionDays', 'expression', 30, { min: 1, max: 365 }),
+    },
     integration: {
+      naturalExpression: readBool(integration, 'naturalExpression', 'integration', true),
       enabled: readBool(integration, 'enabled', 'integration', true),
       mode: readEnum(integration, 'mode', 'integration', 'augment' as const, ['augment', 'standalone'] as const),
       localOwner: readBool(integration, 'localOwner', 'integration', true),
       excludedAgentIds: readStringArray(integration, 'excludedAgentIds', 'integration', []),
       contextBudgetTokens: readNumber(integration, 'contextBudgetTokens', 'integration', 450, { min: 100, max: 2000 }),
+      personaId: readString(integration, 'personaId', 'integration', '').trim(),
+      personaPresets: Object.fromEntries(Object.entries(asRecord(integration['personaPresets'], 'integration.personaPresets')).map(([id, value]) => [
+        id, readEnum({ preset: value }, 'preset', `integration.personaPresets.${id}`, 'balanced' as const, ['irritable', 'balanced', 'gentle'] as const),
+      ])),
     },
     companion: {
       id: readString(companion, 'id', 'companion', DEFAULT_CONFIG.companion.id),
@@ -437,6 +493,8 @@ export function resolveConfig(raw: unknown = {}): Config {
       },
     },
     proactive: {
+      opportunityThreshold: readNumber(proactive, 'opportunityThreshold', 'proactive', .35, { min: -1, max: 1 }),
+      shareSources: readStringArray(proactive, 'shareSources', 'proactive', []),
       enabled: readBool(proactive, 'enabled', 'proactive', true),
       timezone: readString(proactive, 'timezone', 'proactive', DEFAULT_CONFIG.proactive.timezone),
       quietStart,
@@ -454,7 +512,7 @@ export function resolveConfig(raw: unknown = {}): Config {
       ),
     },
     background: {
-      consolidateEveryTurns: readNumber(background, 'consolidateEveryTurns', 'background', 25, { min: 1 }),
+      consolidateEveryTurns: readNumber(background, 'consolidateEveryTurns', 'background', 8, { min: 1 }),
       inputLimitTokens: readNumber(background, 'inputLimitTokens', 'background', 2000, { min: 128 }),
       outputLimitTokens: readNumber(background, 'outputLimitTokens', 'background', 200, { min: 32 }),
       maxConcurrentJobs: readNumber(background, 'maxConcurrentJobs', 'background', 1, { min: 1 }),
@@ -462,6 +520,11 @@ export function resolveConfig(raw: unknown = {}): Config {
       retryLimit: readNumber(background, 'retryLimit', 'background', 2, { min: 0 }),
     },
     storage: {
+      syncIntervalSeconds: readNumber(storage, 'syncIntervalSeconds', 'storage', 300, { min: 30, max: 86400 }),
+      transferDirectory: (() => {
+        const path = readString(storage, 'transferDirectory', 'storage', '')
+        return path ? resolvePath(path, path, 'storage.transferDirectory') : ''
+      })(),
       directory: resolvePath(
         readString(storage, 'directory', 'storage', ''),
         join(dshHome(), 'companions'),
@@ -470,6 +533,14 @@ export function resolveConfig(raw: unknown = {}): Config {
       backupDaily: readBool(storage, 'backupDaily', 'storage', true),
       backupRetentionDays: readNumber(storage, 'backupRetentionDays', 'storage', 7, { min: 1 }),
       busyTimeoutMs: readNumber(storage, 'busyTimeoutMs', 'storage', 1000, { min: 1 }),
+    },
+    cloud: {
+      enabled: readBool(cloud, 'enabled', 'cloud', false),
+      syncOnStartup: readBool(cloud, 'syncOnStartup', 'cloud', true),
+        startupTimeoutSeconds: readNumber(cloud, 'startupTimeoutSeconds', 'cloud', 15, { min: 1, max: 120 }),
+      autoUpload: readBool(cloud, 'autoUpload', 'cloud', true),
+      intervalSeconds: readNumber(cloud, 'intervalSeconds', 'cloud', 300, { min: 30, max: 86400 }),
+      credentialFile: (() => { const file = readString(cloud, 'credentialFile', 'cloud', ''); return file ? resolvePath(file, file, 'cloud.credentialFile') : '' })(),
     },
     observability: {
       includeMessageContentByDefault: readBool(observability, 'includeMessageContentByDefault', 'observability', false),
@@ -502,6 +573,16 @@ export function resolveConfig(raw: unknown = {}): Config {
   }
   if (config.generation.deliveryMode === 'early' && !config.generation.sendOnSayClose) {
     throw new ConfigError('generation.deliveryMode', "deliveryMode=early 需要 sendOnSayClose=true")
+  }
+  try { new Intl.DateTimeFormat('en', { timeZone: config.proactive.timezone }).format(0) } catch { throw new ConfigError('proactive.timezone', '必须是有效的IANA时区') }
+  if (config.proactive.shareSources.length > 4) throw new ConfigError('proactive.shareSources', '最多4个明确授权的来源')
+  for (const address of config.proactive.shareSources) {
+    try { const url = new URL(address); if (url.protocol !== 'https:' || url.username || url.password) throw new Error('invalid') } catch { throw new ConfigError('proactive.shareSources', '必须是无凭据的HTTPS网址') }
+  }
+  for (const [field, value] of Object.entries({ repairMaxCallsPerTurn: config.expression.repairMaxCallsPerTurn, repairMaxCallsPerDay: config.expression.repairMaxCallsPerDay, historyTurns: config.expression.historyTurns, auditRetentionDays: config.expression.auditRetentionDays })) if (!Number.isInteger(value)) throw new ConfigError(`expression.${field}`, '必须是整数')
+  if (config.expression.mode === 'enforce') {
+    config.integration.naturalExpression = true
+    config.integration.contextBudgetTokens = Math.max(config.integration.contextBudgetTokens, MIN_EXPRESSION_BUDGET)
   }
 
   config.channel.ownerChats = config.channel.ownerChats.map(id => id.startsWith('private:') ? id : `private:${id}`)
@@ -541,6 +622,7 @@ export function redactConfig(config: Config): Record<string, Json> {
     proactive: { ...config.proactive },
     background: { ...config.background },
     storage: { ...config.storage },
+    cloud: { ...config.cloud },
     observability: { ...config.observability },
     channel: {
       chatSessionsFile: config.channel.chatSessionsFile,

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 后台记忆巩固（任务书 §10.5、§11.4）。
  *
  * 关键约束：后台模型**只能产出结构化变更**，不能写 SQL、不能改人格/关系/权限、
@@ -15,6 +15,7 @@ import type { Repositories } from '../storage/repositories.js'
 import type { RawMessage } from '../domain/types.js'
 import { dedupeEvidence, FactUpdater, keyOf, type FactCandidate } from './fact-updater.js'
 import { estimateTokens } from '../runtime/context-budget.js'
+import { matchSourceQuote } from './quote-match.js'
 
 export interface BatchMessage {
   id: string
@@ -25,6 +26,7 @@ export interface BatchMessage {
 }
 
 export interface ConsolidationBatch {
+  fragment?: { messageId: string; end: number; complete: boolean }
   conversationId: string
   principalId: string
   messages: BatchMessage[]
@@ -102,6 +104,7 @@ export class Consolidator {
     let used = 0
     let dropped = 0
     let cursor = input.afterSeq
+    let fragment: ConsolidationBatch['fragment']
 
     for (const row of rows) {
       cursor = Math.max(cursor, row.seq)
@@ -123,6 +126,20 @@ export class Consolidator {
       }
       const cost = estimateTokens(content) + 4
       if (used + cost > this.config.inputLimitTokens) {
+        if (picked.length === 0 && cost > this.config.inputLimitTokens) {
+          const saved = this.repos.getSetting(`local.consolidation.fragment:${input.conversationId}`)
+          const progress = saved ? JSON.parse(saved) as { messageId: string; end: number } : undefined
+          const start = progress?.messageId === row.id ? progress.end : 0
+          let lo = start + 1, hi = row.content.length, end = start
+          while (lo <= hi) { const mid = Math.floor((lo + hi) / 2); if (estimateTokens(row.content.slice(start, mid)) + 8 <= this.config.inputLimitTokens) { end = mid; lo = mid + 1 } else hi = mid - 1 }
+          if (end > start && /[\uD800-\uDBFF]/.test(row.content[end - 1]!)) end--
+          if (end <= start) throw new Error('Consolidation fragment budget cannot fit one character')
+          picked.push({ id: row.id, role: row.role, content: row.content.slice(start, end), occurredAtMs: row.occurredAtMs, seq: row.seq })
+          used = estimateTokens(row.content.slice(start, end)) + 8
+          fragment = { messageId: row.id, end, complete: end === row.content.length }
+          cursor = fragment.complete ? row.seq : row.seq - 1
+          break
+        }
         // 不静默丢弃：把游标停在未处理处，下一批继续（§10.5）。
         cursor = row.seq - 1
         break
@@ -144,6 +161,7 @@ export class Consolidator {
       cursor,
       estimatedTokens: used,
       dropped,
+      ...(fragment ? { fragment } : {}),
     }
   }
 
@@ -152,7 +170,11 @@ export class Consolidator {
    * 任何一条不合规只拒绝**那一条**，不整批回滚——但会记录原因，供 /fish doctor 与审计。
    */
   applyPlan(batch: ConsolidationBatch, plan: ConsolidationPlan, nowMs: number): ApplyReport {
-    const known = new Map(batch.messages.map((message) => [message.id, message]))
+    // Recheck evidence after the model call: a user may have deleted it meanwhile.
+    const known = new Map(batch.messages.filter(message => {
+      const current = this.repos.getRawMessage(message.id)
+      return current && current.deletedAtMs === null && current.conversationId === batch.conversationId
+    }).map((message) => [message.id, message]))
     const rejected: { index: number; reason: string }[] = []
     const touched: string[] = []
     const maxChanges = 20
@@ -184,7 +206,7 @@ export class Consolidator {
         eventAtMs: change.eventAtMs,
         observedAtMs: nowMs,
         evidence: dedupeEvidence(
-          change.sourceMessageIds.map((id) => ({ messageId: id, quote: change.quote.slice(0, 200) })),
+          change.sourceMessageIds.map((id) => ({ messageId: id, quote: matchSourceQuote(known.get(id)!.content, change.quote)!.slice(0, 200) })),
         ),
         ...(change.relation === undefined ? {} : { relation: change.relation }),
       }
@@ -200,12 +222,13 @@ export class Consolidator {
       plan.cursor !== null && plan.cursor !== undefined && Number.isFinite(plan.cursor)
         ? Math.min(Math.max(0, Math.trunc(plan.cursor)), batch.cursor)
         : batch.cursor
+    if (batch.fragment) this.repos.setSetting(`local.consolidation.fragment:${batch.conversationId}`, batch.fragment.complete ? '' : JSON.stringify(batch.fragment), nowMs)
 
     this.repos.audit({
       principalId: batch.principalId,
       kind: 'memory.consolidate',
       entityId: batch.conversationId,
-      payload: { applied: touched.length, rejected: rejected.length, nextCursor },
+      payload: { applied: touched.length, rejected: rejected.length, reasons: rejected, nextCursor },
       createdAtMs: nowMs,
     })
     return { applied: touched.length, rejected, nextCursor, touchedIds: touched }
@@ -231,8 +254,7 @@ export function validateChange(change: ConsolidationChange, known: ReadonlyMap<s
   }
   if (typeof change.quote !== 'string' || change.quote.trim() === '') return '缺少原话证据'
   // 证据必须是来源消息里真实出现的片段，防止模型编造引用。
-  const source = known.get(change.sourceMessageIds[0] ?? '')
-  if (source !== undefined && !normalizeQuote(source.content).includes(normalizeQuote(change.quote))) {
+  if (change.sourceMessageIds.some(id => matchSourceQuote(known.get(id)!.content, change.quote) === null)) {
     return '证据片段未在来源消息中出现'
   }
   if (change.kind === 'fact' && (change.subject === null || change.predicate === null)) {
@@ -243,12 +265,16 @@ export function validateChange(change: ConsolidationChange, known: ReadonlyMap<s
   return null
 }
 
-function normalizeQuote(text: string): string {
-  return text.replace(/[\s，。！？、；：""''（）…—～,.!?;:'"()]/g, '').toLowerCase()
-}
-
 export function memoryIdFor(principalId: string, change: ConsolidationChange): string {
-  const parts = [principalId, change.kind, keyOf(change.subject) ?? '-', keyOf(change.predicate) ?? '-', stableKey(change.object)]
+  const subject = keyOf(change.subject)
+  const predicate = keyOf(change.predicate)
+  const parts = [principalId, change.kind, subject ?? '-', predicate ?? '-', stableKey(change.object)]
+  // subject 与 predicate 都缺时没有可辨识的键：这类条目（典型是 episode）会共用同一个 id，
+  // 后一条命中 fact-updater 的「已存在」分支——只追加证据，claim 永不更新，内容静默丢失。
+  // 只在两者都缺时把 claim 纳入；fact 类必带 subject+predicate，既有 id 因此保持不变。
+  // 判缺失看 keyOf 的 null（空白也归一成 null）；不能拿 '-' 当哨兵，否则真实键值就是 "-" 时被误判成缺键。
+  // claim 用与落库完全相同的 trim + 截断值，保证 id 与行内内容一致。
+  if (subject === null && predicate === null) parts.push(hashKey(change.claim.trim().slice(0, 500)))
   return 'mem_' + hashKey(parts.join('|'))
 }
 

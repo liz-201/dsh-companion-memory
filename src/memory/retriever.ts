@@ -19,6 +19,7 @@ import { canReadMemory } from '../domain/identity.js'
 import type { MemoryRow, Repositories } from '../storage/repositories.js'
 import { tokensToMatchQuery } from './normalizer.js'
 import { buildQueryTerms, termWeights, type AliasDictionary } from './lexical-index.js'
+import { repairContext } from './episodic.js'
 
 export interface RetrievalRequest {
   binding: IdentityBinding
@@ -141,6 +142,8 @@ export class Retriever {
       if (base === undefined) continue
       const reasons = [...base.reasons]
       let score = base.score
+      const archived = this.repos.db.get<{ archive_state: string }>('SELECT archive_state FROM memory_lifecycle WHERE memory_id = ?', row.id)?.archive_state === 'archived'
+      if (archived && !/以前|之前|回忆|那次|历史/.test(request.query)) { score *= .6; reasons.push('archived-lower-priority') }
 
       const kindBonus = KIND_BONUS[row.kind] ?? 0
       if (kindBonus !== 0) {
@@ -164,9 +167,18 @@ export class Retriever {
       // 显著性只做轻微加成：高显著度的旧事不该压过当轮话题。
       score += Math.min(0.08, Math.max(0, row.salience) * 0.08)
 
+      const item = toItem(row, evidenceCount)
+      if (['episode','hypothesis'].includes(row.kind)) {
+        const repairs = repairContext(this.repos, request.binding, row.id)
+        if (repairs.length) {
+          item.claim += `\n同一事件的后续原话（勿只复述旧片段）：${JSON.stringify(repairs)}`
+          item.evidenceIds.push(...repairs.map(repair => repair.messageId))
+          reasons.push('repair-context')
+        }
+      }
       scored.push({
         row,
-        item: toItem(row, evidenceCount),
+        item,
         score,
         reasons,
         channels: [...base.channels],
@@ -178,7 +190,7 @@ export class Retriever {
     const arousal = request.emotionArousal ?? 0
     const factual = request.forceFactual === true || terms.factual
     if (!factual && arousal > 0 && scored.length > 0) {
-      const maxBonus = this.config.emotionBonusMax
+      const maxBonus = Math.min(.15, this.config.emotionBonusMax)
       for (const entry of scored) {
         const intensity = Math.min(1, Math.abs(entry.row.salience) + Math.abs(entry.row.confidence) * 0.5)
         const bonus = maxBonus * arousal * intensity * 0.5

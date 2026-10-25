@@ -4,17 +4,19 @@ import { type HostContext } from './adapters/dsh-adapter.js';
 import { type CompatibilityReport } from './adapters/compatibility.js';
 import type { DeliveryReceipt } from './domain/types.js';
 /** Cordis 插件名。 */
-export declare const name = "dsh-companion-memory"; /** * 依赖的服务。 *
-* 全部声明为 optional：缺 `systemPrompt` 就退化成「把人格并进消息体」，
-* 缺 `llm` 就退化成 plain 模式，缺 `commands` 只是没有斜杠命令——
-* 但插件本身必须还能加载并如实报告降级（§18.3）。 */
-export declare const inject: {
-    required: string[];
-    optional: string[];
-};
+export declare const name = "dsh-companion-memory";
+/** Optional services use ctx.get / child injection; Cordis treats object keys as service names. */
+export declare const inject: string[];
 /** 宿主 ctx 的最小结构（其余成员一律按 unknown 处理，避免和宿主类型强绑定）。 */
 interface PluginContext extends HostContext {
     systemPrompt?: {
+        context?(options: {
+            name: string;
+            order: number;
+            required: boolean;
+            interpolate: boolean;
+            text: (context: unknown) => string;
+        }): () => void;
         section(options: {
             name: string;
             order: number;
@@ -47,10 +49,13 @@ interface PluginContext extends HostContext {
         }): () => void;
     };
     get?(service: string): unknown;
+    inject?(services: string[], callback: (context: PluginContext) => void): {
+        dispose(): unknown;
+    };
     provide?(service: string, value: unknown): void;
     emit?(event: string, ...args: unknown[]): void;
     effect?(callback: () => (() => void) | void, label?: string): void;
-    on?(event: string, callback: (...args: unknown[]) => void): void;
+    on?(event: string, callback: (...args: unknown[]) => unknown): unknown;
 }
 /** 交给 dsh-onebot-qq 桥的入站消息。 */
 export interface CompanionInbound {

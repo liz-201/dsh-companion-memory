@@ -33,6 +33,34 @@ import { join } from 'node:path'
 
 import { apply, name, inject } from '../../lib/index.js'
 
+test('default mounted plugin observes DSH desktop events, exposes local commands and exports on shutdown', async t => {
+  t.mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() })
+  const dir = mkdtempSync(join(tmpdir(), 'companion-desktop-'))
+  const host = makeHost(['<evt>{"v":1,"e":[{"k":"appreciation","to":"self","i":"neutral","s":2,"c":0.99}]}</evt>'])
+  const listeners = new Map()
+  host.ctx.on = (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name) }
+  try {
+    apply(host.ctx, { storage: { directory: dir, backupDaily: false }, proactive: { enabled: false } })
+    const service = host.provided.get('companionMemory')
+    const session = { id: 'desktop-session' }, agent = { id: 'desktop-agent', session }
+    listeners.get('session/event')(session, { type: 'user/message', seq: 1, time: Date.now(), surfaceOp: 'append', data: { id: 'human-1', source: { kind: 'user' }, content: [{ type: 'text', text: '谢谢你一直陪我' }] } })
+    assert.equal(service.status().counts.raw_messages, 1)
+    for (let i = 0; i < 100 && service.status().background.doneTotal === 0; i++) {
+      t.mock.timers.tick(6000)
+      await new Promise(resolve => setImmediate(resolve))
+    }
+    assert.equal(service.status().counts.affect_events, 1, JSON.stringify(service.status().background))
+    assert.equal(host.requests.length, 1, 'only the background extraction calls the model')
+    assert.equal(host.commands[0].handler({ agent, rawInput: 'mood' }).kind, 'success')
+    const sync = host.commands[0].handler({ agent, rawInput: 'sync' })
+    assert.equal(sync.kind, 'success'); assert.match(sync.text, /companion.json/)
+    const assembly = await listeners.get('system-prompt/assemble')({}, { agent }, async () => ({ sections: [] }))
+    assert.match(assembly.sections[0].text, /当前电脑/)
+    await service.shutdown()
+    assert.equal(listeners.size, 0)
+  } finally { host.effects[0]?.()(); t.mock.timers.reset(); safeRemove(dir) }
+})
+
 /** 假宿主：只实现插件用到的那几个成员。 */
 function makeHost(streamText) {
   const sections = []
@@ -129,9 +157,7 @@ test('主动开关持久化并可在重启后恢复，review 绑定隔离正式�
 
 test('插件元信息齐全', () => {
   assert.equal(name, 'dsh-companion-memory')
-  assert.deepEqual(inject.required, [])
-  assert.ok(inject.optional.includes('systemPrompt'))
-  assert.ok(inject.optional.includes('llm'))
+  assert.deepEqual(inject, [], 'Cordis accepts service names, not required/optional buckets')
 })
 
 test('装配 → 入站 → 落库 → 卸载', async () => {
@@ -158,11 +184,11 @@ test('装配 → 入站 → 落库 → 卸载', async () => {
     const service = host.provided.get('companionMemory')
     assert.equal(typeof service.handleInbound, 'function')
     assert.equal(typeof service.handleCommand, 'function')
-    assert.equal(service.version, '0.1.1')
+    assert.equal(service.version, '0.3.0-dev.4')
 
     // 状态：还没入站时也能回答
     const status = service.status()
-    assert.equal(status.version, '0.1.1')
+    assert.equal(status.version, '0.3.0-dev.4')
     assert.equal(status.companion.id, 'dafeiyu')
     assert.ok(status.database.endsWith('.sqlite3'))
 

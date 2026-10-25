@@ -17,6 +17,7 @@ import type { MemoryKind, Visibility } from '../domain/types.js'
 import type { InsertMemoryInput, MemoryRow, Repositories } from '../storage/repositories.js'
 import { buildAliases, buildLexicalTerms } from './lexical-index.js'
 import { normalizeText } from './normalizer.js'
+import { suppressedBy } from './suppression.js'
 
 export interface FactCandidate {
   /** 稳定 id（调用方生成，通常是 ulid/幂等键）。 */
@@ -82,6 +83,7 @@ export class FactUpdater {
     if (evidence.length === 0) {
       return { type: 'rejected', reason: '缺少来源消息：记忆必须有 evidence message id' }
     }
+    for (const tombstone of this.repos.listTombstones(candidate.principalId)) if (suppressedBy(String(tombstone['selector_json']), { id: candidate.id, claim: candidate.claim, object: candidate.object, sourceIds: evidence.map(item => item.messageId) })) return { type: 'rejected', reason: '已遗忘的记忆不能从旧来源重新提取' }
     const existing = this.repos.getMemory(candidate.id)
     if (existing !== undefined) {
       const known = new Set(this.repos.memoryEvidence(candidate.id).map((item) => item.messageId))

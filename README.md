@@ -1,12 +1,18 @@
 # dsh-companion-memory
 
+可选：[Codex 与 DSH Desktop 直接协作桥接](docs/CODEX_BRIDGE.md)，通过本机 API 交换开发任务和结果。
+
+> **0.3.0-dev.4 开发版**：新增[一键记忆导入导出与百度网盘同步](docs/CLOUD_MEMORY_SYNC.md)。`/fish files` 打开管理页；连接网盘后，导出自动上传，启动自动检查并合并云端记忆。全量 258 项通过，真实账号授权与网盘验收待完成，见[验证记录](docs/CLOUD_MEMORY_VALIDATION.md)。[实施进度](docs/roadmap/v0.3/IMPLEMENTATION_PROGRESS.md)和[使用与回退](docs/roadmap/v0.3/DEV_USAGE.md)列明验证界限；真实模型盲评等门槛仍按[原实施任务书](docs/roadmap/v0.3/IMPLEMENTATION_TASKBOOK.md)执行。
+
+> **0.2.0 新增**：普通 DSH 会话默认产生记忆与情感，无需 QQ；可通过文件拷贝或网盘在启动时合并记忆，并识别新旧电脑。普通会话输入 `/fish sync` 获取迁移文件路径。详见 [跨电脑同步说明](docs/SYNC.md)。
+
 > **0.1.1 状态**：已修复情感写入/重放、每日上限、完整请求预算、提前发送与 outbox、提醒开关及作用域；新增隔离 review 和 QQ 桥补丁。当前结果与限制以 [优化验证记录](docs/OPTIMIZATION_REPORT.md) 为准。真实模型与真实 QQ 尚未验收；接入步骤见 [QQ_BRIDGE.md](docs/QQ_BRIDGE.md)。
 
 给 DeepSeek Harness 的**伴侣记忆 + 情绪连续性 + QQ 输出协议**插件：本地 SQLite 是唯一权威，
 长期记忆有证据链，情绪状态可衰减可复现，主动消息先落 outbox 再发。
 
 - 可用性：本机已实测挂载（DSH Desktop 0.2.1-rc.2 · Node 24.21.0 · Windows x64）
-- 状态：功能全部实现，单元/集成/回放测试通过；QQ 真实收发需 OneBot 协议端在线（见下）
+- 状态：核心功能已接入，开发版持续验证；真实网盘、QQ 收发、模型质量与多日使用按各自验收记录确认
 - 数据：`%USERPROFILE%\.dsh\companions\<companion-id>.sqlite3`，卸载插件不删库
 
 ## 它做什么
@@ -23,7 +29,7 @@
 
 ## 环境要求
 
-- DSH Desktop ≥ 0.2.1-rc.2（宿主需要 `systemPrompt` / `commands` / `llm` / `onebot` 能力）
+- DSH Desktop：普通会话需要 `session/event` 与 `system-prompt/assemble` 事件；提取情感需要可用的 `llm` 模型。QQ / OneBot 可选，接口说明见 [SYNC.md](docs/SYNC.md)。
 - Node ≥ 22.13（用内置 `node:sqlite`，不需要任何原生模块；实测 24.21.0）
 - 可选：`dsh-onebot-qq` + OneBot 11 协议端（NapCat / SnowLuma）用于 QQ 收发
 
@@ -49,7 +55,7 @@ cd Z:\deepseekharness\fiels\dsh-companion-memory
 - id: dsh-companion-memory
   name: dsh-companion-memory
   config:
-    companion: { id: blue-fish-main, name: 大肥鱼, preset: irritable }
+    companion: { id: blue-fish-main, name: 大肥鱼, preset: balanced }
     channel:
       ownerChats: ["private:2940015320"]      # 只有这些会话能触发伴侣行为
       enabledGroupChats: []
@@ -57,6 +63,12 @@ cd Z:\deepseekharness\fiels\dsh-companion-memory
 ```
 
 全部字段与默认值见 `src/config.ts` 的 `DEFAULT_CONFIG`；非法配置会在启动时报 `ConfigError` 并指出字段名。
+
+普通 DSH 会话也会自动整理长期记忆：默认每个角色会话累计 8 条未整理用户消息触发，不依赖 QQ 或 `turns`。升级会补查已有消息；引文允许格式差异并保存真实原文。详见 [本地记忆整理](docs/LOCAL_CONSOLIDATION.md)。
+
+桌面后台抽取有独立的输出契约、纠错重试和终止失败后的保守情绪降级；只采集助手可见正文。观察记录写入 `turns`，评价与情绪事件可以互相追溯。每日备份在启动时入队，按 UTC 日期去重；计数与失败诊断持久化。`doctor` 默认读取 desktop profile，也支持 `--config <JSON/YAML>`。修复范围和复测方法见 [复测修复说明](docs/RETEST_REPAIRS.md)。
+
+默认开启情感驱动的自然表达：熟悉、开心、戒备和生气会影响接话方式；明确的交流偏好作为长期记忆参与表达，不固定套梗，也不播报情感等级。详见 [自然表达](docs/NATURAL_EXPRESSION.md)。
 
 ## 命令（QQ 或 Web 会话内）
 
@@ -69,7 +81,7 @@ cd Z:\deepseekharness\fiels\dsh-companion-memory
 /fish remember <内容>       手动写入一条记忆
 /fish forget <id> --confirm 删除一条记忆（需显式确认）
 /fish correct <eventId> <说明>  纠正一次误判
-/fish personality balanced 切换人设（irritable/balanced/gentle）
+/fish personality balanced 调整当前角色的情感性格（irritable/balanced/gentle）
 /fish proactive on|off     开关主动消息
 /fish reset relationship --confirm  重置关系值
 /fish export               导出记忆 JSON

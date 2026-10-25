@@ -21,6 +21,11 @@ export interface BatchMessage {
     seq: number;
 }
 export interface ConsolidationBatch {
+    fragment?: {
+        messageId: string;
+        end: number;
+        complete: boolean;
+    };
     conversationId: string;
     principalId: string;
     messages: BatchMessage[];

@@ -18,12 +18,13 @@
  *   · 任何一步抛错都转成 TurnOutcome.failed，不把异常抛。QQ 桥。
  */
 import type { Config } from '../config.js';
-import { type Clock, type DeliveryReceipt, type IdentityBinding } from '../domain/types.js';
+import { type Clock, type DeliveryReceipt, type IdentityBinding, type RawMessage } from '../domain/types.js';
 import type { Repositories } from '../storage/repositories.js';
 import type { Retriever } from '../memory/retriever.js';
 import type { FactUpdater } from '../memory/fact-updater.js';
 import { PromptStore } from './context-builder.js';
 import { TokenLedger, type TokenCounter } from './context-budget.js';
+import { type EvtPayload } from './output-protocol.js';
 import type { ConversationQueue } from './conversation-queue.js';
 import { Metrics } from './metrics.js';
 import type { BackgroundQueue } from './background-queue.js';
@@ -102,6 +103,7 @@ export interface TurnCoordinatorDeps {
     callModel: ModelCaller;
     clock?: Clock;
     counter?: TokenCounter;
+    deviceText?: string;
     /** 会话是否处于「已建立的互损语境」——由调用方根据近期事件给出。*/
     teasingContext?: (conversationId: string) => boolean;
     log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
@@ -110,7 +112,13 @@ export declare class TurnCoordinator {
     private readonly deps;
     private readonly clock;
     private readonly counter;
+    private readonly expression;
     constructor(deps: TurnCoordinatorDeps);
+    recordObservationUsage(turnId: string, attempt: number, usage: ModelChunk['usage']): void;
+    /** Apply background observations to a persisted host message without generating a second reply. */
+    observe(binding: IdentityBinding, message: RawMessage, payload: EvtPayload, options?: {
+        producer?: 'background_observer' | 'local_rule';
+    }): Promise<void>;
     /**
      * 处理一条入站消息。返回的结果只用来看日志/测试，调用方不依赖它做业务流程。
      *

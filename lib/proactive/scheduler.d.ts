@@ -37,6 +37,8 @@ export interface SchedulerOptions {
     }) => Promise<string | null>;
     /** 主回合是否在跑（避免插队）。 */
     mainTurnInFlight?: (conversationId: string) => boolean;
+    prepare?: (conversationId: string, content: string, expectedSeq: number, candidateKey: string) => Promise<string | null>;
+    beforeScan?: (nowMs: number) => Promise<void>;
     now?: () => number;
     log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
 }

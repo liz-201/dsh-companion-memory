@@ -26,6 +26,16 @@ node_modules/
 *.sqlite3-shm
 backups/
 *.log
+artifacts/
+dist/
+credentials/
+*.companion.json
+.env
+.env.*
+docs/_exchange/
+docs/BRIDGE_PROTOCOL.md
+docs/HANDOFF_CHATGPT_20261025.md
+fb43af7415b20adf0ea692fdb32162e9_22334487904261338.md
 
 # ---------------------------------------------------------------------------
 # OS / editor noise

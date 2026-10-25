@@ -16,6 +16,7 @@ import type { Config } from '../config.js'
 import type { Repositories } from '../storage/repositories.js'
 import type { Metrics } from '../runtime/metrics.js'
 import { buildCandidates, startOfDayMs, type Candidate } from './candidate-builder.js'
+import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
 
 export interface SchedulerConversation {
     conversationId: string
@@ -36,6 +37,8 @@ export interface SchedulerOptions {
     generate: (input: { candidate: Candidate; conversation: SchedulerConversation }) => Promise<string | null>
     /** 主回合是否在跑（避免插队）。 */
     mainTurnInFlight?: (conversationId: string) => boolean
+    prepare?: (conversationId: string, content: string, expectedSeq: number, candidateKey: string) => Promise<string | null>
+    beforeScan?: (nowMs: number) => Promise<void>
     now?: () => number
     log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
 }
@@ -120,6 +123,7 @@ export class ProactiveScheduler {
         this.scanning = true
 
         try {
+            await this.options.beforeScan?.(nowMs)
             const conversations = this.options.listConversations()
             for (const conversation of conversations) {
                 result.scanned += 1
@@ -146,7 +150,7 @@ export class ProactiveScheduler {
         const { config, repos, metrics, log } = this.options
         void repos
         const conversationId = conversation.conversationId
-        const last = repos.lastOutboxForConversation(conversationId)
+        const last = repos.db.get<Record<string, unknown>>(`SELECT * FROM outbox WHERE conversation_id = ? AND ${SPONTANEOUS_OUTBOX} AND status IN ('sent','unknown') ORDER BY planned_at_ms DESC LIMIT 1`, conversationId)
         const lastPlanned = last === undefined ? undefined : num(last, 'planned_at_ms') ?? undefined
         const lastStatus = last === undefined ? undefined : str(last, 'status')
         // 只有「已经发出去过」的消息才计入冷却；被取消的不算。
@@ -199,7 +203,10 @@ export class ProactiveScheduler {
             return
         }
 
-        const text = content.trim().slice(0, 1000)
+        const prepared = this.options.prepare ? await this.options.prepare(conversationId, content, expectedInboundSeq, candidate.key) : content
+        if (!prepared) { result.skipped.push({ conversationId, reason: 'expression-or-target-unavailable' }); return }
+        const text = prepared.trim()
+        if (text.length > 1000) { result.skipped.push({ conversationId, reason: 'generated-content-too-long' }); return }
         const outboxId = `ob_${hashText(`${candidate.key}:${nowMs}`)}`
         const enqueued = repos.enqueueOutbox({
             id: outboxId,
@@ -213,6 +220,8 @@ export class ProactiveScheduler {
             expectedInboundSeq: candidate.kind === 'reminder' ? null : expectedInboundSeq,
         })
         if (enqueued.inserted) {
+            repos.db.run("UPDATE proactive_opportunities SET status = 'selected' WHERE id = ?", candidate.key)
+            repos.db.run('UPDATE outbox SET opportunity_id = ?, persona_id = ?, origin_device_id = ? WHERE id = ?', candidate.key, repos.getSetting(`persona.id:${conversation.principalId}`) ?? 'builtin', repos.getSetting('local.device-id') ?? '', outboxId)
             result.enqueued += 1
             metrics.count('proactive.enqueued', 1)
             repos.audit({

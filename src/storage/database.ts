@@ -98,31 +98,35 @@ export class Database {
   }
 
   /**
-   * 同步事务。嵌套调用复用外层事务（savepoint 语义由外层 BEGIN 承担），
+   * 同步事务。嵌套调用使用 savepoint，
    * 抛错一律 ROLLBACK 并原样抛出——不允许「吞掉异常当作成功」。
    */
   transaction<T>(work: () => T): T {
     this.assertOpen()
-    const outer = this.depth === 0
-    const savepoint = `sp_${this.depth}`
+    const initialDepth = this.depth
+    const outer = initialDepth === 0
+    const savepoint = `sp_${initialDepth}`
     if (outer) this.raw.exec('BEGIN IMMEDIATE')
     else this.raw.exec(`SAVEPOINT ${savepoint}`)
-    this.depth += 1
+    this.depth = initialDepth + 1
     try {
       const value = work()
-      this.depth -= 1
       if (outer) this.raw.exec('COMMIT')
       else this.raw.exec(`RELEASE ${savepoint}`)
       return value
     } catch (error) {
-      this.depth -= 1
       try {
         if (outer) this.raw.exec('ROLLBACK')
-        else this.raw.exec(`ROLLBACK TO ${savepoint}`)
+        else {
+          this.raw.exec(`ROLLBACK TO ${savepoint}`)
+          this.raw.exec(`RELEASE ${savepoint}`)
+        }
       } catch {
         // 回滚失败说明连接已不可用，交由上层降级并上报。
       }
       throw error
+    } finally {
+      this.depth = initialDepth
     }
   }
 

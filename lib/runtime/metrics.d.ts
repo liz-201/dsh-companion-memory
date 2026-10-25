@@ -9,6 +9,7 @@
  *   装配 p95 ≤ 50ms；正文首字 p95 ≤ 1.2s；正文完整 p95 ≤ 3s；发送 p95 ≤ 1s。
  * 这里**不宣称**达标，只负责把实测值算出来给 bench/doctor 报告。
  */
+import type { Repositories } from '../storage/repositories.js';
 export type Phase = 'assembly' | 'retrieval' | 'queue-wait' | 'provider-first-token' | 'say-close' | 'evt-apply' | 'send' | 'total';
 export declare const PHASES: readonly Phase[];
 /** §17.1 的验收目标；报告里逐项对比，达不到就如实写「未达标」。 */
@@ -39,6 +40,9 @@ export declare class Metrics {
     private readonly counters;
     private readonly degraded;
     private readonly limit;
+    private repos;
+    /** Daily counters survive restarts; timing samples remain a bounded in-memory window. */
+    attachStorage(repos: Repositories): void;
     /** cap 防止长跑进程无限增长；超出后丢最旧的样本（计数器不受影响）。 */
     constructor(limit?: number);
     record(turnId: string, phase: Phase, ms: number, atMs: number): void;

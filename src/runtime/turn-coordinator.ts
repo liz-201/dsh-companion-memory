@@ -22,6 +22,7 @@ import type { Config } from '../config.js'
 import { decideStrategy, checkContinuity } from '../domain/interaction-policy.js'
 import { checkEligibility, isRepairIntent } from '../domain/event-policy.js'
 import { initialSnapshot, projectSnapshot, reduce } from '../domain/affect-reducer.js'
+import { personalityPreset } from '../domain/personality.js'
 import { dailyUsage } from '../domain/affect-projector.js'
 import { emptyDelta, transition, worthMentioning } from '../domain/episode-manager.js'
 import { looksLikeReminderRequest, parseWhen } from '../domain/time-parse.js'
@@ -38,6 +39,15 @@ import { Metrics } from './metrics.js'
 import type { BackgroundQueue } from './background-queue.js'
 import { EVENT_KINDS, MEMORY_HINTS } from './output-protocol.js'
 import { hashKey } from '../memory/consolidator.js'
+import { matchSourceQuote } from '../memory/quote-match.js'
+import { scheduleConsolidation } from './consolidation-scheduler.js'
+import { renderInteractionHabits } from '../memory/interaction-habits.js'
+import { ExpressionRuntime } from '../expression/runtime.js'
+import { CORE_POLICY, renderPlan } from '../expression/policy.js'
+import { annotateEpisode } from '../memory/episodic.js'
+import { learnExplicitHabit } from '../memory/habit-learning.js'
+import { observeOpportunity } from '../proactive/opportunity.js'
+import { observeFeedback } from '../proactive/feedback.js'
 
 export interface ModelCallRequest {
   turnId: string
@@ -122,6 +132,7 @@ export interface TurnCoordinatorDeps {
   callModel: ModelCaller
   clock?: Clock
   counter?: TokenCounter
+  deviceText?: string
   /** 会话是否处于「已建立的互损语境」——由调用方根据近期事件给出。*/
   teasingContext?: (conversationId: string) => boolean
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
@@ -137,10 +148,51 @@ function nextTurnId(nowMs: number): string {
 export class TurnCoordinator {
   private readonly clock: Clock
   private readonly counter: TokenCounter
+  private readonly expression: ExpressionRuntime
 
   constructor(private readonly deps: TurnCoordinatorDeps) {
     this.clock = deps.clock ?? systemClock
     this.counter = deps.counter ?? estimatedCounter
+    this.expression = new ExpressionRuntime(deps.repos, deps.config, deps.callModel)
+  }
+
+  recordObservationUsage(turnId: string, attempt: number, usage: ModelChunk['usage']): void {
+    const entry = { turnId, phase: 'background' as const, provider: usage?.provider ?? 'host', model: usage?.model ?? 'host-default',
+      inputTokens: usage?.inputTokens ?? 'unknown' as const, outputTokens: usage?.outputTokens ?? 'unknown' as const,
+      cacheHitTokens: usage?.cacheHitTokens ?? 'unknown' as const, cacheMissTokens: usage?.cacheMissTokens ?? 'unknown' as const,
+      reasoningTokens: usage?.reasoningTokens ?? 'unknown' as const, retry: attempt - 1, atMs: this.clock.now() }
+    this.deps.ledger.record(entry)
+    if (this.deps.repos.db.isOpen) this.deps.repos.audit({ principalId: null, kind: 'model-usage', entityId: turnId, payload: entry, createdAtMs: entry.atMs })
+  }
+
+  /** Apply background observations to a persisted host message without generating a second reply. */
+  async observe(binding: IdentityBinding, message: RawMessage, payload: EvtPayload,
+    options: { producer?: 'background_observer' | 'local_rule' } = {}): Promise<void> {
+    if (message.role !== 'user' || this.deps.repos.getRawMessage(message.id)?.deletedAtMs !== null) return
+    const now = this.clock.now()
+    const turnId = `observe:${message.id}`
+    const previousTurn = this.deps.repos.getTurn(turnId)
+    if (previousTurn?.status === 'completed') return
+    if (!previousTurn) this.deps.repos.createTurn({ id: turnId, conversation_id: message.conversationId,
+      session_id: binding.conversationId, inbound_message_id: message.id, state_revision_used: null,
+      status: 'running', started_at_ms: now })
+    const stored = this.deps.repos.getSnapshot(binding.principalId)
+    const snapshot = stored?.snapshot ?? initialSnapshot(binding.principalId, this.deps.config.companion.preset, this.deps.config.affect.ruleVersion, now)
+    const problems: string[] = []
+    await this.applyEvt(turnId, binding, {
+      binding, chatId: '', text: message.content, platformMessageKey: message.platformMessageKey,
+      occurredAtMs: message.occurredAtMs, observedAtMs: now, sessionId: binding.conversationId,
+    }, message, { ...payload, e: previousTurn?.status === 'fallback' ? [] : payload.e, t: [] }, snapshot, problems,
+      options.producer ?? 'background_observer')
+    if (problems.some(problem => /^(evt-apply-failed|memory-write-failed)/.test(problem))) {
+      this.deps.repos.updateTurn(turnId, { status: 'failed', tail_status: 'rejected', ended_at_ms: now })
+      throw new Error(problems.join('; '))
+    }
+    const current = this.deps.repos.getSnapshot(binding.principalId)
+    const projected = projectSnapshot(current?.snapshot ?? snapshot, now, this.deps.config.affect)
+    this.deps.repos.putSnapshot({ ...projected, projectedThroughSeq: Math.max(projected.projectedThroughSeq, message.seq) }, current?.revision ?? 0)
+    this.deps.repos.updateTurn(turnId, { status: options.producer === 'local_rule' ? 'fallback' : 'completed',
+      tail_status: options.producer === 'local_rule' ? 'fallback' : 'applied', ended_at_ms: now })
   }
 
   /**
@@ -216,6 +268,9 @@ export class TurnCoordinator {
     const deps = this.deps
     const now = this.clock.now()
     const binding = inbound.binding
+    learnExplicitHabit(deps.repos, binding, message)
+    observeFeedback(deps.repos, binding, message)
+    observeOpportunity(deps.repos, binding, message)
     const conversationId = binding.conversationId
     const problems: string[] = []
     let say: string | null = null
@@ -233,6 +288,12 @@ export class TurnCoordinator {
     const deliver = async (text: string): Promise<void> => {
       if (sent !== null) return
       say = renderReply(text)
+      const current = deps.repos.getSnapshot(binding.principalId)?.snapshot
+      if (current) {
+        const guarded = await this.expression.guard(say, current, inbound.text, this.clock.now(), undefined, [], binding)
+        if (guarded.text === null) { say = null; throw new Error('expression-blocked') }
+        say = guarded.text
+      }
       const id = `reply_${turnId}`
       deps.repos.enqueueOutbox({ id, conversationId, turnId, candidateKey: `reply:${turnId}`,
         taskId: null, content: say, contentHash: hashKey(say), plannedAtMs: this.clock.now(), expectedInboundSeq: message.seq })
@@ -263,7 +324,7 @@ export class TurnCoordinator {
       const boundaries = renderBoundaries({
         agreements: pending.filter(row => row['kind'] === 'commitment').map(row => String(row['content'])),
         pendingReminders: pending.filter(row => row['kind'] === 'reminder').map(row => String(row['content'])),
-        scopeNote: binding.visibility === 'group' ? '当前是群聊：不得复述私聊资料。' : '当前是本人私聊。',
+        scopeNote: (binding.visibility === 'group' ? '当前是群聊：不得复述私聊资料。' : '当前是本人私聊。') + (deps.deviceText ?? ''),
       })
       const strategy = decideStrategy({ snapshot, appraisal: undefined,
         establishedTeasingContext: deps.teasingContext?.(conversationId) ?? false,
@@ -271,10 +332,10 @@ export class TurnCoordinator {
       const recent = deps.repos.recentRawMessages(conversationId, 12, message.seq)
         .filter(row => row.role === 'user' || (row.role === 'assistant' && ['accepted', 'sent', 'delivered'].includes(row.deliveryStatus ?? '')))
         .map(row => ({ id: row.id, text: row.content, role: row.role }))
-      const preset = deps.repos.getSetting('companion.preset')
-      const prompts = deps.prompts.load(preset === 'gentle' || preset === 'balanced' || preset === 'irritable' ? preset : deps.config.companion.preset)
+      const prompts = deps.prompts.load(personalityPreset(deps.repos, deps.config, binding.principalId))
       const built = buildContext({ persona: prompts.persona, protocol: prompts.protocol, boundaries, snapshot, recent,
-        userText: inbound.text, strategy: `【本轮倾向】${strategy.prior}`,
+        userText: inbound.text, strategy: [deps.config.expression.mode === 'enforce' ? CORE_POLICY : '', `【本轮倾向】${strategy.prior}`, deps.config.integration.naturalExpression ? renderPlan(this.expression.plan(snapshot, inbound.text, now)) : '',
+          deps.config.integration.naturalExpression ? renderInteractionHabits(deps.repos, binding, now) : ''].filter(Boolean).join('\n'),
         memoryItems: retrieval.selected, checkpoint: renderCheckpoint(parseCheckpoint(deps.repos.currentCheckpoint(conversationId)?.['summary_json'])),
         counter: this.counter, memoryConfig: deps.config.memory })
       budget = describeBudget(built)
@@ -359,6 +420,7 @@ export class TurnCoordinator {
     payload: EvtPayload,
     snapshotBefore: ReturnType<typeof initialSnapshot>,
     problems: string[],
+    producer: 'live_tail' | 'background_observer' | 'local_rule' = 'live_tail',
   ): Promise<boolean> {
     const deps = this.deps
     const now = this.clock.now()
@@ -367,6 +429,7 @@ export class TurnCoordinator {
 
 
     for (const [index, event] of payload.e.map((e, i) => [i, e] as const)) {
+      if (['insult', 'teasing', 'boundary'].includes(event.k) && /别人说|他说|她说|引用|台词|比如|例如|假如/.test(message.content) && !/我就是(?:在)?骂你|我(?:刚才)?说你/.test(message.content)) { problems.push('evt-skip:quoted-or-hypothetical'); continue }
       if (!EVENT_KINDS.includes(event.k)) {
         problems.push(`evt-kind-not-allowed:${event.k}`)
         continue
@@ -379,7 +442,7 @@ export class TurnCoordinator {
         severity: event.s,
         confidence: event.c,
         evidenceQuote: event.k === 'neutral' ? undefined : inbound.text.slice(0, 100),
-        source: 'live_tail',
+        source: producer === 'live_tail' ? 'live_tail' : 'background',
         revision: index,
       }
       const eligibility = checkEligibility(
@@ -391,12 +454,17 @@ export class TurnCoordinator {
         },
         deps.config.affect,
       )
+      const idempotencyKey = `${message.id}:${event.k}:${event.to}:${index}`
+      const appraisalId = `ap_${hashKey(idempotencyKey)}`
+      deps.repos.insertAppraisal({ id: appraisalId, sourceMessageId: message.id, revision: index,
+        kind: event.k, intent: event.i, target: event.to, severity: event.s, confidence: event.c,
+        evidenceQuote: appraisal.evidenceQuote ?? null, producer,
+        status: eligibility.eligible || eligibility.softMoodOnly ? 'active' : 'pending', createdAtMs: now })
       if (!eligibility.eligible && !eligibility.softMoodOnly) {
         problems.push(`evt-skip:${eligibility.reason}`)
         continue
       }
 
-      const idempotencyKey = `${message.id}:${event.k}:${event.to}:${index}`
       const seen = new Set<string>()
       for (const row of deps.repos.activeAffectEvents(binding.principalId)) {
         const key = row['idempotency_key']
@@ -463,7 +531,7 @@ export class TurnCoordinator {
           id: `ae_${hashKey(idempotencyKey)}`,
           principalId: binding.principalId,
           conversationId: binding.conversationId,
-          appraisalId: null,
+          appraisalId,
           episodeId: reduced.episode.id === 'none' ? null : reduced.episode.id,
           idempotencyKey,
           eventTimeMs: message.occurredAtMs,
@@ -485,10 +553,11 @@ export class TurnCoordinator {
         // episode 落库：新。/ 更新只应用差额（§8.7。
         if (record.id !== 'none') deps.repos.upsertEpisode(record, false)
         applied = true
+        annotateEpisode(deps.repos, binding.principalId, appraisal, now)
 
         // 修复意图：把 open episode 推到 repairing
         if (target !== undefined && isRepairIntent(event.i, event.k)) {
-          deps.repos.upsertEpisode(transition(target, 'repairing', now), false)
+          deps.repos.upsertEpisode(transition(deps.repos.getEpisode(target.id) ?? target, 'repairing', now), false)
         }
         })
       } catch (error) {
@@ -502,7 +571,8 @@ export class TurnCoordinator {
         problems.push(`memory-kind-not-allowed:${hint.k}`)
         continue
       }
-      if (hint.q.length === 0 || !normalizeForMatch(inbound.text).includes(normalizeForMatch(hint.q))) {
+      const quote = matchSourceQuote(inbound.text, hint.q)
+      if (quote === null) {
         problems.push('memory-quote-not-found')
         continue
       }
@@ -516,12 +586,12 @@ export class TurnCoordinator {
         predicate: null,
         object: { text: hint.t },
         claim: hint.t.slice(0, 100),
-        sourceKind: 'live_tail',
+        sourceKind: producer,
         confidence: 0.7,
         salience: 0.6,
         eventAtMs: message.occurredAtMs,
         observedAtMs: now,
-        evidence: [{ messageId: message.id, quote: hint.q.slice(0, 100) }],
+        evidence: [{ messageId: message.id, quote: quote.slice(0, 200) }],
         lexicalTerms: undefined,
       } as never)
       if (outcome.type === 'inserted' || outcome.type === 'unchanged') applied = true
@@ -574,7 +644,7 @@ export class TurnCoordinator {
       principalId: binding.principalId,
       kind: 'evt-applied',
       entityId: turnId,
-      payload: { events: payload.e.length, action: payload.a ?? null, applied },
+      payload: { events: payload.e.length, action: payload.a ?? null, applied, problems },
       createdAtMs: now,
     })
     return applied
@@ -583,15 +653,7 @@ export class TurnCoordinator {
   private scheduleConsolidation(binding: IdentityBinding, conversationId: string, afterSeq: number): void {
     const bg = this.deps.background
     if (bg === undefined) return
-    if (this.deps.config.background.consolidateEveryTurns <= 0) return
-    const turns = this.deps.repos.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM turns WHERE conversation_id = ?', conversationId)?.n ?? 0
-    const every = this.deps.config.background.consolidateEveryTurns
-    if (turns % every !== 0) return
-    const cursor = Number(this.deps.repos.getSetting(`consolidation.cursor:${conversationId}`) ?? 0)
-    bg.enqueue('consolidate', { conversationId, principalId: binding.principalId, afterSeq: cursor }, {
-      dedupKey: `consolidate:${conversationId}:${Math.floor(turns / every)}`,
-      availableAtMs: this.clock.now() + 1000, nowMs: this.clock.now(), principalId: binding.principalId,
-    })
+    scheduleConsolidation(this.deps.repos, this.deps.config, bg, conversationId, binding.principalId, this.clock.now())
     void afterSeq
 
   }

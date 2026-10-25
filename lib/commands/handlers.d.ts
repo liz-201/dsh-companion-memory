@@ -19,6 +19,7 @@ import type { Retriever } from '../memory/retriever.js';
 import type { FactUpdater } from '../memory/fact-updater.js';
 import type { Metrics } from '../runtime/metrics.js';
 import type { CompatibilityReport } from '../adapters/compatibility.js';
+import type { MemoryTransfer } from '../cloud/memory-transfer.js';
 export type FishCommandKind = 'success' | 'error';
 export interface FishCommandResult {
     kind: FishCommandKind;
@@ -42,6 +43,9 @@ export interface SchedulerStatus {
     suppressedReason?: string | null;
 }
 export interface FishCommandDeps {
+    transfer?: MemoryTransfer;
+    manageUrl?: () => string;
+    publishLocal?: () => string | null;
     review?: {
         begin: (fixture: string) => string;
         end: () => string;

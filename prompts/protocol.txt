@@ -8,6 +8,8 @@ JSON 为 {"v":1,"e":[...],"a":"动作"}。e 最多两个事件，k 使用允许�
 
 可选 m 最多一条直接偏好或事实候选，必须引用当前消息中可匹配的短原文。长材料不在尾部复制，交由后台处理。
 
+m 的格式为 {"k":"fact|preference|interaction_rule","t":"简短陈述","q":"原话摘录"}。用户明确要求的称呼、回复长短、表情或玩笑边界用 interaction_rule。只有明确针对自己的偏好才长期记住；举例、引用别人的口头禅或本轮临时格式要求不推断为长期习惯。不从助手自己的说话方式反推用户偏好。
+
 允许的事件类型：insult, teasing, apology, appreciation, correction, boundary, promise_kept, promise_broken, reassurance, neutral。
 允许的动作：neutral, support, tease, retort, withdraw, repair, explain, ask。
 提醒候选写作 {"k":"reminder","text":"要做的事","when":"用户原话里的时间","q":"原话摘录"}，when 缺失时按未定时间处理，不要自己编一个时刻。

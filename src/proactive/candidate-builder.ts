@@ -15,10 +15,13 @@
  */
 import type { Config } from '../config.js'
 import type { TaskKind } from '../domain/types.js'
-import { partsInZone } from '../domain/time-parse.js'
+import { partsInZone, zonedToUtc } from '../domain/time-parse.js'
 import type { Repositories } from '../storage/repositories.js'
+import { opportunityScore } from './opportunity.js'
+import { topicAcceptance } from './feedback.js'
+import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
 
-export type CandidateKind = 'reminder' | 'open_topic' | 'repair' | 'small_talk'
+export type CandidateKind = 'reminder' | 'open_topic' | 'repair' | 'small_talk' | 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic'
 
 export interface Candidate {
     /** 稳定键：同一候选重复扫描不会重复入队（outbox.candidate_key 唯一）。 */
@@ -91,9 +94,7 @@ export function inQuietHours(nowMs: number, timezone: string, quietStart: string
 /** 当天 0 点（用户时区）的毫秒时间戳，用于日限额统计。 */
 export function startOfDayMs(nowMs: number, timezone: string): number {
     const parts = partsInZone(nowMs, timezone)
-    const secondsOfDay = (parts.hour * 60 + parts.minute) * 60 + parts.second
-    // 只用整数秒偏移，毫秒部分保留：offset 不会跨越不存在的墙钟时间。
-    return nowMs - secondsOfDay * 1000 - (nowMs % 1000)
+    return zonedToUtc(parts.year, parts.month, parts.day, 0, 0, timezone)
 }
 
 function str(row: Record<string, unknown>, key: string): string | null {
@@ -117,16 +118,21 @@ export function checkGates(input: CandidateInput): GateResult {
     const notes: string[] = []
 
     if ((repos.getSetting('proactive.enabled') ?? (config.proactive.enabled ? '1' : '0')) !== '1') blocked.push('proactive-disabled')
+    const ownership = repos.db.get<{ active_device_id: string; conflict_json: string | null }>('SELECT active_device_id, conflict_json FROM proactive_ownership WHERE companion_id = ?', config.companion.id)
+    if (ownership && (ownership.conflict_json || ownership.active_device_id !== repos.getSetting('local.device-id'))) blocked.push('inactive-device')
 
     if (inQuietHours(nowMs, config.proactive.timezone, config.proactive.quietStart, config.proactive.quietEnd)) {
         blocked.push('quiet-hours')
     }
 
     if (input.mainTurnInFlight === true) blocked.push('main-turn-in-flight')
+    if (Number(repos.getSetting(`proactive.snooze-until:${input.principalId}`) ?? 0) > nowMs) blocked.push('user-busy')
 
     const dailySince = startOfDayMs(nowMs, config.proactive.timezone)
     const sentToday = repos.countOutboxSince(conversationId, dailySince)
     if (sentToday >= config.proactive.spontaneousLimitPerDay) blocked.push('daily-limit')
+    const globalCount = Number(repos.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM outbox WHERE ${SPONTANEOUS_OUTBOX} AND planned_at_ms >= ? AND status IN ('pending','sending','sent','unknown')`, dailySince)?.n ?? 0)
+    if (globalCount >= config.proactive.spontaneousLimitPerDay) blocked.push('global-daily-limit')
 
     const last = input.lastProactiveAtMs
     if (last !== undefined) {
@@ -135,7 +141,7 @@ export function checkGates(input: CandidateInput): GateResult {
     }
 
     // 「发出去没回」就暂停：只看主动消息，不把用户正常回复算成未回复。
-    const unresolved = repos.unresolvedOutbox(conversationId, nowMs - 7 * 24 * 60 * 60_000)
+    const unresolved = repos.unresolvedOutbox(conversationId, 0)
     if (unresolved.length >= config.proactive.pauseAfterUnanswered) blocked.push('awaiting-reply')
 
     if (blocked.length === 0 && sentToday > 0) notes.push(`今日已主动 ${sentToday} 条`)
@@ -149,7 +155,7 @@ function reminderCandidates(input: CandidateInput): Candidate[] {
     const out: Candidate[] = []
     for (const row of rows) {
         const status = str(row, 'status')
-        if (status !== 'confirmed' && status !== 'proposed') continue
+        if (status !== 'confirmed') continue
         const kind = str(row, 'kind') as TaskKind | null
         if (kind !== 'reminder') continue
         const id = str(row, 'id')
@@ -211,7 +217,7 @@ function repairCandidate(input: CandidateInput): Candidate[] {
     const grievance = input.grievance ?? 0
     if (grievance < 0.35) return []
     return [{
-        key: `repair:${input.conversationId}:${Math.floor(input.nowMs / (60 * 60_000))}`,
+        key: `repair:${input.conversationId}:${String(input.repos.listEpisodes(input.principalId, ['open', 'repairing'], 1)[0]?.['id'] ?? 'unknown')}`,
         kind: 'repair',
         topic: '上一次争执还没收尾，用一句具体的话把话头递回去，不要反复要求道歉',
         taskId: null,
@@ -222,28 +228,24 @@ function repairCandidate(input: CandidateInput): Candidate[] {
 }
 
 function smallTalkCandidate(input: CandidateInput): Candidate[] {
-    const { nowMs, conversationId, affection, grievance } = input
-    const affectionValue = affection ?? 0.5
-    const grievanceValue = grievance ?? 0
-    // 关系越差，闲聊越少；这是「降低倾向」，不是硬禁止。
-    const relationship = affectionValue - grievanceValue
-    if (relationship < 0.25) return []
-    // 没有真实话题线索时不编造「看到你刚下班」这类无依据内容（§14.1）。
-    return [{
-        key: `small:${conversationId}:${Math.floor(nowMs / (6 * 60 * 60_000))}`,
-        kind: 'small_talk',
-        topic: '没有新事实可说的日常开场：只允许基于本会话里真实发生过的共同话题',
-        taskId: null,
-        scores: {
-            relevance: 0.2,
-            openness: 0.3,
-            relationship: Math.max(0, Math.min(1, relationship)),
-            initiative: 0.4,
-            interruption: 0.8,
-        },
-        reasons: ['关系允许轻松开口', '没有必须说的具体事'],
-        mustSendByMs: null,
-    }]
+    const { repos, conversationId, nowMs } = input
+    repos.db.run("UPDATE proactive_opportunities SET status = 'expired' WHERE status = 'pending' AND expires_at_ms <= ?", nowMs)
+    return repos.db.all<Record<string, unknown>>("SELECT * FROM proactive_opportunities WHERE conversation_id = ? AND status = 'pending' AND not_before_ms <= ? AND expires_at_ms > ? ORDER BY created_at_ms LIMIT 20", conversationId, nowMs, nowMs).filter(row => {
+      const blockedSource = repos.getSetting(`proactive.blocked-kind:${input.principalId}:${String(row['kind'])}`)
+      if (blockedSource && repos.getRawMessage(blockedSource)?.deletedAtMs === null) return false
+      return (JSON.parse(String(row['source_ids_json'])) as string[]).every(id => {
+        const blockedBy = repos.getSetting(`proactive.blocked-source:${input.principalId}:${id}`)
+        if (blockedBy && repos.getRawMessage(blockedBy)?.deletedAtMs === null) return false
+        const raw = repos.getRawMessage(id), memory = repos.getMemory(id)
+        return raw && raw.deletedAtMs === null || memory && memory.status === 'active' && memory.principal_id === input.principalId
+      })
+    }).map(row => {
+      const state = repos.getSnapshot(input.principalId)?.snapshot
+      const scores = JSON.parse(String(row['scores_json'])) as Record<string, number>
+      scores['acceptance'] = topicAcceptance(repos, input.principalId, String(row['kind']), nowMs, input.config.proactive.timezone)
+      if (state) { scores['initiative'] = state.personality.initiative; scores['willingness'] = Math.max(0, Math.min(1, .5 + state.mood.joy * .3 - state.mood.tension * .4 - state.mood.hurt * .4)) }
+      return { key: String(row['id']), kind: row['kind'] as CandidateKind, topic: String(row['summary']), taskId: null, scores, reasons: [`可追溯来源：${String(row['source_ids_json'])}`], mustSendByMs: null }
+    }).filter(candidate => opportunityScore(candidate.scores) >= input.config.proactive.opportunityThreshold)
 }
 
 /** 排序权重（§14.2 顺序）：相关度 > 未结 > 关系 > 主动性 > 打扰成本（负向）。 */
@@ -277,14 +279,12 @@ export function buildCandidates(input: CandidateInput): CandidateResult {
         ...repairCandidate(input),
         ...smallTalkCandidate(input),
     ]
-    const order: Record<CandidateKind, number> = { reminder: 0, open_topic: 1, repair: 2, small_talk: 3 }
     all.sort((a, b) => {
-        const kindDiff = order[a.kind] - order[b.kind]
-        if (kindDiff !== 0) return kindDiff
-        const scoreDiff = rankScore(b) - rankScore(a)
+        if (a.kind === 'reminder' || b.kind === 'reminder') return a.kind === b.kind ? 0 : a.kind === 'reminder' ? -1 : 1
+        const scoreDiff = opportunityScore(b.scores) - opportunityScore(a.scores)
         if (Math.abs(scoreDiff) > 1e-9) return scoreDiff
         return a.key < b.key ? -1 : a.key > b.key ? 1 : 0
     })
 
-    return { gate, candidates: all, selected: all[0] ?? null }
+    return { gate, candidates: all, selected: all.find(candidate => opportunityScore(candidate.scores) >= input.config.proactive.opportunityThreshold) ?? null }
 }

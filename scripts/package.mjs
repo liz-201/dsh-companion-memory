@@ -40,7 +40,10 @@ function copy(entry) {
   const to = join(stage, entry)
   if (!existsSync(from)) throw new Error(`缺少必须打包的文件/目录：${entry}`)
   mkdirSync(dirname(to), { recursive: true })
-  cpSync(from, to, { recursive: true })
+  cpSync(from, to, { recursive: true, filter: path => {
+    const name = relative(root, path).split('\\').join('/')
+    return name !== 'docs/_exchange' && !['docs/BRIDGE_PROTOCOL.md', 'docs/HANDOFF_CHATGPT_20261025.md'].includes(name)
+  } })
 }
 
 function walk(dir) {
@@ -66,7 +69,7 @@ function main() {
 
   // src 是运行入口（package.json main 指向 src/index.js），lib 是编译产物；
   // prompts/migrations 是运行时资源，缺一不可。
-  const entries = ['src', 'lib', 'prompts', 'migrations', 'integration', 'scripts', 'docs', 'cordis.patch.yml', 'package.json', 'README.md', 'LICENSE']
+  const entries = ['src', 'lib', 'prompts', 'migrations', 'integration', 'scripts', 'docs', 'tests/fixtures', 'cordis.patch.yml', 'package.json', 'README.md', 'LICENSE']
   for (const entry of entries) copy(entry)
 
   const files = walk(stage).map((full) => ({

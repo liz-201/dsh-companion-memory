@@ -2,38 +2,64 @@ import { randomUUID, createHash } from 'node:crypto'
 import type { Config } from '../config.js'
 import type { Repositories } from '../storage/repositories.js'
 import type { IdentityBinding } from './types.js'
-import { PRESETS } from './affect-reducer.js'
+import { PRESETS, initialSnapshot } from './affect-reducer.js'
+import type { PersonaContext } from '../runtime/persona-context.js'
+import { inspectDevice } from '../runtime/device-context.js'
+import { PersonalityProfiles } from '../storage/personality-profiles.js'
 
 export class OwnerIdentity {
-  readonly ownerId: string
+  get ownerId(): string { return this.repos.getSetting('owner.id') ?? this.initialOwnerId }
   readonly deviceId: string
-  readonly principalId: string
+  get principalId(): string { return `${this.config.companion.id}:owner:${this.ownerId}` }
+  private readonly initialOwnerId: string
 
-  constructor(private readonly repos: Repositories, private readonly config: Config, nowMs = Date.now()) {
-    this.ownerId = repos.getSetting('owner.id') ?? randomUUID()
-    this.deviceId = repos.getSetting('local.device-id') ?? randomUUID()
+  constructor(private readonly repos: Repositories, private readonly config: Config, nowMs = Date.now(), deviceId = inspectDevice().id) {
+    this.initialOwnerId = repos.getSetting('owner.id') ?? randomUUID()
+    this.deviceId = deviceId
     repos.setSetting('owner.id', this.ownerId, nowMs)
     repos.setSetting('local.device-id', this.deviceId, nowMs)
-    this.principalId = `${config.companion.id}:owner:${this.ownerId}`
     repos.ensureCompanion(config.companion.id, config.companion.name, PRESETS[config.companion.preset], nowMs)
     repos.ensurePrincipal(this.principalId, config.companion.id, 'owner', this.ownerId, nowMs)
   }
 
-  binding(channel: string, address: string, accountId = this.deviceId, nowMs = Date.now()): IdentityBinding {
-    const namespace = `${channel}:${accountId}`
-    this.repos.db.run('INSERT INTO identity_links(namespace, external_key, principal_id, created_at_ms) VALUES (?, ?, ?, ?) ON CONFLICT(namespace, external_key) DO NOTHING', namespace, address, this.principalId, nowMs)
-    const id = `owner-conv:${createHash('sha256').update(`${this.principalId}:${namespace}:${address}`).digest('hex').slice(0, 32)}`
-    this.repos.ensureConversation(id, this.principalId, 'private', `${namespace}:${address}`, nowMs)
+  binding(channel: string, address: string, accountId = this.deviceId, nowMs = Date.now(), persona: PersonaContext = { id: 'builtin', preset: this.config.companion.preset }): IdentityBinding {
+    const role = persona.id === 'builtin' ? '' : `:persona:${createHash('sha256').update(persona.id).digest('hex').slice(0, 24)}`
+    const principalId = this.principalId + role
+    this.repos.ensurePrincipal(principalId, this.config.companion.id, 'owner', this.ownerId + role, nowMs)
+    if (this.repos.getSetting(`persona.id:${principalId}`) !== persona.id) this.repos.setSetting(`persona.id:${principalId}`, persona.id, nowMs)
+    const selected = this.repos.getSetting(`personality.preset:${principalId}`) ?? (role === '' ? this.repos.getSetting('companion.preset') : undefined)
+    const preset = selected === 'irritable' || selected === 'gentle' || selected === 'balanced' ? selected : persona.preset
+    const stored = this.repos.getSnapshot(principalId)
+    const marker = `personality.default:${principalId}`
+    // Keep the relationship and mood intact when changing the temperament default.
+    // Explicit /fish selections (including old builtin selections) always win.
+    if (!stored || this.repos.getSetting(marker) !== preset) {
+      const snapshot = stored?.snapshot ?? initialSnapshot(principalId, preset, this.config.affect.ruleVersion, nowMs)
+      this.repos.putSnapshot({ ...snapshot, personality: { ...PRESETS[preset] }, revision: (stored?.revision ?? 0) + 1 }, stored?.revision ?? 0)
+      this.repos.setSetting(marker, preset, nowMs)
+    }
+    const profiles = new PersonalityProfiles(this.repos)
+    let profile = profiles.ensure(this.config.companion.id, persona.id, this.repos.getSnapshot(principalId)!.snapshot.personality, stored ? { mix: {}, overrides: {}, variation: { enabled: false, maxDelta: .05, seed: null } } : this.config.personality, nowMs)
+    const profileMarker = `personality.profile-preset:${principalId}`
+    if (selected && this.repos.getSetting(profileMarker) !== preset) profile = profiles.configure(this.config.companion.id, persona.id, PRESETS[preset], { mix: {}, overrides: { ...profile.traits, ...PRESETS[preset] }, variation: { enabled: false, maxDelta: .05, seed: null } }, nowMs)
+    this.repos.setSetting(profileMarker, preset, nowMs)
+    const current = this.repos.getSnapshot(principalId)!
+    const legacy = Object.fromEntries(Object.keys(PRESETS[preset]).map(key => [key, profile.traits[key as keyof typeof profile.traits]])) as unknown as typeof current.snapshot.personality
+    if (JSON.stringify(current.snapshot.personality) !== JSON.stringify(legacy)) this.repos.putSnapshot({ ...current.snapshot, personality: legacy, revision: current.revision + 1 }, current.revision)
+    const namespace = `${channel}:${accountId}${role}`
+    this.repos.db.run('INSERT INTO identity_links(namespace, external_key, principal_id, created_at_ms) VALUES (?, ?, ?, ?) ON CONFLICT(namespace, external_key) DO NOTHING', namespace, address, principalId, nowMs)
+    const id = `owner-conv:${createHash('sha256').update(`${principalId}:${namespace}:${address}`).digest('hex').slice(0, 32)}`
+    this.repos.ensureConversation(id, principalId, 'private', `${namespace}:${address}`, nowMs)
     this.repos.db.run('INSERT INTO owner_channels(conversation_id, channel, account_id, address) VALUES (?, ?, ?, ?) ON CONFLICT(conversation_id) DO NOTHING', id, channel, accountId, address)
     return { companionId: this.config.companion.id, botAccountId: accountId, userId: this.ownerId,
-      conversationId: id, conversationKind: 'private', principalId: this.principalId, visibility: 'private' }
+      conversationId: id, conversationKind: 'private', principalId, visibility: 'private' }
   }
 
   /** Fold only explicitly allowed private QQ identities into the same local owner. */
   adoptLegacyQq(nowMs = Date.now()): number {
     const allowed = new Set(this.config.channel.ownerChats.map(chat => chat.replace(/^private:/, '')))
     const db = this.repos.db
-    const legacy = db.all<{ id: string; user_id: string; bot_account_id: string }>("SELECT * FROM principals WHERE companion_id = ? AND bot_account_id <> 'owner' AND id NOT LIKE 'review:%'", this.config.companion.id).filter(row => allowed.has(row.user_id))
+    const legacy = db.all<{ id: string; user_id: string; bot_account_id: string }>("SELECT p.* FROM principals p WHERE companion_id = ? AND bot_account_id <> 'owner' AND p.id NOT LIKE 'review:%' AND EXISTS (SELECT 1 FROM conversations c WHERE c.principal_id = p.id AND c.kind = 'private') AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.principal_id = p.id AND c.kind = 'group')", this.config.companion.id).filter(row => allowed.has(row.user_id))
     if (!legacy.length) return 0
     db.transaction(() => {
       const tables = ['conversations', 'appraisals', 'relationship_episodes', 'affect_events', 'memories', 'tasks', 'background_jobs', 'deletion_tombstones', 'audit_events', 'identity_links']
@@ -51,6 +77,7 @@ export class OwnerIdentity {
         for (const table of tables) {
           if (db.all<{ name: string }>(`PRAGMA table_info(${table})`).some(column => column.name === 'principal_id')) db.run(`UPDATE ${table} SET principal_id = ? WHERE principal_id = ?`, this.principalId, principal.id)
         }
+        if (db.capabilities().fts5) db.run('UPDATE memory_fts SET principal_id = ? WHERE principal_id = ?', this.principalId, principal.id)
         const baseline = this.repos.getSetting(`affect.baseline:${principal.id}`)
         if (baseline && !this.repos.getSetting(`affect.baseline:${this.principalId}`)) this.repos.setSetting(`affect.baseline:${this.principalId}`, JSON.stringify({ ...JSON.parse(baseline), principalId: this.principalId }), nowMs)
       }

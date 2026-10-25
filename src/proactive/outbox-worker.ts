@@ -19,6 +19,8 @@ import type { DeliveryReceipt } from '../domain/types.js'
 import type { Repositories } from '../storage/repositories.js'
 import type { QqTransport } from '../adapters/qq-transport.js'
 import type { Metrics } from '../runtime/metrics.js'
+import { checkGates, startOfDayMs } from './candidate-builder.js'
+import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
 
 export type OutboxOutcome =
     | { id: string; status: 'sent'; receipt: DeliveryReceipt; chatId: string }
@@ -35,6 +37,8 @@ export interface OutboxWorkerOptions {
     chatForConversation: (conversationId: string) => string | null
     now?: () => number
     limit?: number
+    send?: (conversationId: string, content: string, key: string, expectedSeq: number | null) => Promise<DeliveryReceipt>
+    targetBusy?: (conversationId: string) => boolean
 }
 
 /** 可重试的错误码：只认平台明确说过「稍后再试」的那几类。 */
@@ -111,7 +115,7 @@ export class OutboxWorker {
             const startedAt = this.now()
             let receipt: DeliveryReceipt
             try {
-                receipt = await transport.sendText(chatId, content)
+                receipt = this.options.send ? await this.options.send(conversationId, content, id, num(row, 'expected_inbound_seq')) : await transport.sendText(chatId, content)
             } catch (error) {
                 // 传输层自身抛错 = 我们不知道平台有没有收到：按 unknown 处理，不重发。
                 receipt = { kind: 'unknown', code: 'transport_threw', atMs: this.now() }
@@ -119,6 +123,9 @@ export class OutboxWorker {
             }
             metrics.span('', 'send', startedAt, this.now())
             repos.finishOutbox(id, receipt)
+            if (receipt.kind === 'accepted' && !repos.db.get("SELECT id FROM raw_messages WHERE conversation_id = ? AND role = 'assistant' AND platform_message_key = ?", conversationId, receipt.platformMessageId ?? id)) repos.insertRawMessage({ id: `outbox:${id}`, conversationId, platformMessageKey: receipt.platformMessageId ?? id, role: 'assistant', sourceKind: 'proactive', content, occurredAtMs: receipt.atMs, observedAtMs: receipt.atMs, deliveryStatus: 'accepted', deletedAtMs: null })
+            const opportunity = str(row, 'opportunity_id')
+            if (opportunity && receipt.kind === 'accepted') repos.db.run("UPDATE proactive_opportunities SET status = 'sent' WHERE id = ?", opportunity)
 
             const taskId = str(row, 'task_id')
             if (receipt.kind === 'accepted' && taskId !== null) {
@@ -154,6 +161,7 @@ export class OutboxWorker {
     /** 发送前复核（§14.4）。返回取消原因，null 表示可以发。 */
     private recheck(row: Record<string, unknown>, conversationId: string, nowMs: number): string | null {
         const { repos, config } = this.options
+        if (this.options.targetBusy?.(conversationId)) return 'main-turn-in-flight'
         const expected = num(row, 'expected_inbound_seq')
         if (expected !== null) {
             const latest = repos.latestInboundSeq(conversationId)
@@ -161,9 +169,12 @@ export class OutboxWorker {
         }
 
         const taskId = str(row, 'task_id')
+        let isReminder = false
         if (taskId !== null) {
-            const task = repos.db.get<{ status: string; expires_at_ms: number | null }>('SELECT status, expires_at_ms FROM tasks WHERE id = ?', taskId)
-            if (!task || task.status !== 'confirmed') return 'task_finished'
+            const task = repos.db.get<{ kind: string; status: string; expires_at_ms: number | null }>('SELECT kind, status, expires_at_ms FROM tasks WHERE id = ? AND conversation_id = ?', taskId, conversationId)
+            if (!task || !['confirmed','proposed'].includes(task.status)) return 'task_finished'
+            isReminder = task.kind === 'reminder'
+            if (isReminder && task.status !== 'confirmed') return 'task_unconfirmed'
             if (task.expires_at_ms !== null && task.expires_at_ms <= nowMs) return 'task_expired'
         }
         const plannedAt = num(row, 'planned_at_ms') ?? nowMs
@@ -179,7 +190,24 @@ export class OutboxWorker {
             }
         }
 
-        if (taskId === null && (repos.getSetting('proactive.enabled') ?? (config.proactive.enabled ? '1' : '0')) !== '1') return 'proactive_disabled'
+        if (!isReminder) {
+            const conversation = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', conversationId)
+            const gates = checkGates({ config, repos, conversationId, principalId: conversation?.principal_id ?? '', nowMs })
+            const blocked = gates.blocked.filter(code => !['daily-limit', 'global-daily-limit', 'awaiting-reply'].includes(code))
+            if (blocked.length) return blocked.join(',')
+            const day = startOfDayMs(nowMs, config.proactive.timezone)
+            const others = repos.db.all<Record<string, unknown>>(`SELECT * FROM outbox WHERE id <> ? AND ${SPONTANEOUS_OUTBOX} AND status IN ('sent','unknown') ORDER BY sent_at_ms DESC`, row['id'])
+            if (others.filter(other => Number(other['sent_at_ms'] ?? other['planned_at_ms']) >= day).length >= config.proactive.spontaneousLimitPerDay) return 'global-daily-limit'
+            const last = others[0]
+            if (last && nowMs - Number(last['sent_at_ms'] ?? last['planned_at_ms']) < config.proactive.spontaneousMinGapMinutes * 60000) return 'cooldown'
+            const unresolved = repos.unresolvedOutbox(conversationId, 0).filter(other => other['id'] !== row['id'] && ['sent','unknown'].includes(String(other['status'])))
+            if (unresolved.length >= config.proactive.pauseAfterUnanswered) return 'awaiting-reply'
+            const opportunity = str(row, 'opportunity_id')
+            if (opportunity?.startsWith('op:')) {
+                const live = repos.db.get<{ status: string; expires_at_ms: number }>('SELECT status, expires_at_ms FROM proactive_opportunities WHERE id = ?', opportunity)
+                if (!live || live.status === 'cancelled' || live.expires_at_ms <= nowMs) return 'opportunity-expired'
+            }
+        }
         return null
     }
 }

@@ -8,7 +8,9 @@ interface Checkpoint {
 }
 export interface PortablePayload {
     format: 'dsh-companion-transfer';
-    version: 1;
+    version: 1 | 2;
+    formatVersion?: 2;
+    minReaderVersion?: string;
     id: string;
     createdAtMs: number;
     companionId: string;
@@ -29,8 +31,31 @@ export interface ImportReport {
     alreadyImported: boolean;
     backup: string | null;
     pausedTasks: number;
+    lineageMissing: boolean;
+}
+export declare class PortableImportError extends Error {
+    readonly code: 'owner-mismatch';
+    constructor(code: 'owner-mismatch', message: string);
 }
 export declare function stableJson(value: unknown): string;
+/** Bound lineage metadata; free pages are reused without vacuuming a live DB. */
+export declare function prunePortableCheckpoints(db: Database): {
+    removed: number;
+    retained: number;
+    bytes: number;
+};
+/**
+ * Compact receipt: one row per package, survives inventory pruning.
+ * It is what keeps an own export from being merged back as foreign data once its checkpoint is gone.
+ */
+export type ImportReceiptState = 'present' | 'inserted' | 'mismatch';
+export declare function rememberImportReceipt(db: Database, id: string, checksum: string, nowMs: number): ImportReceiptState;
+/** Refresh a verified, previously processed peer anchor before a cloud handshake.
+ * Keeping the last snapshot of an offline peer gives it a common baseline even
+ * after many exports on another device. Unprocessed files cannot claim lineage.
+ */
+export declare function refreshPortableBaseline(db: Database, payload: PortablePayload, checksum: string, nowMs?: number): boolean;
+export declare function snapshotForTransfer(db: Database): Snapshot;
 export declare function exportPortable(db: Database, config: Config, file: string, options?: {
     includePlugin?: boolean;
     pluginRoot?: string;

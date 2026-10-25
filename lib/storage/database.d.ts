@@ -49,7 +49,7 @@ export declare class Database {
         lastInsertRowid: number;
     };
     /**
-     * 同步事务。嵌套调用复用外层事务（savepoint 语义由外层 BEGIN 承担），
+     * 同步事务。嵌套调用使用 savepoint，
      * 抛错一律 ROLLBACK 并原样抛出——不允许「吞掉异常当作成功」。
      */
     transaction<T>(work: () => T): T;

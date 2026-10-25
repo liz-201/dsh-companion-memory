@@ -19,6 +19,8 @@ import type { DeliveryReceipt } from '../domain/types.js'
 import type { ModelCaller, ModelCallRequest, ModelChunk, SendRequest, TurnSender } from '../runtime/turn-coordinator.js'
 import type { PromptStore } from '../runtime/context-builder.js'
 import { QqTransport } from './qq-transport.js'
+import { hostService } from './host-service.js'
+import { randomUUID } from 'node:crypto'
 
 /** 宿主 ctx 的最小结构：只声明用到的成员，其余按 unknown 处理。 */
 export interface HostContext {
@@ -56,7 +58,7 @@ function method(value: unknown, name: string): ((...args: unknown[]) => unknown)
  * 全都拿不到就返回 null，由调用方降级成 plain 模式（不臆造模型名）。
  */
 export async function resolveDefaultModel(ctx: HostContext): Promise<ResolvedModel | null> {
-  const defaults = ctx['agentDefaultModel']
+  const defaults = hostService(ctx, 'agentDefaultModel')
   const current = method(defaults, 'currentSelection')
   if (current) {
     try {
@@ -79,7 +81,7 @@ export async function resolveDefaultModel(ctx: HostContext): Promise<ResolvedMod
     }
   }
 
-  const llm = ctx['llm']
+  const llm = hostService(ctx, 'llm')
   const listProviders = method(llm, 'listProviders')
   const listModels = method(llm, 'listModels')
   if (listProviders && listModels) {
@@ -113,7 +115,7 @@ export async function* streamFromHost(
   route: ResolvedModel,
   request: ModelCallRequest,
 ): AsyncGenerator<ModelChunk> {
-  const llm = ctx['llm']
+  const llm = hostService(ctx, 'llm')
   const stream = method(llm, 'stream')
   if (!stream) throw new Error('宿主没有 ctx.llm.stream')
 
@@ -135,8 +137,8 @@ export async function* streamFromHost(
     model: route.model,
     ...(reasoningEffort ? { reasoningEffort } : {}),
     messages: [
-      { role: 'system', content: [{ type: 'text', text: request.systemText }] },
-      { role: 'user', content: [{ type: 'text', text: request.userText }] },
+      { id: randomUUID(), role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: request.systemText }] },
+      { id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: request.userText }] },
     ],
     ...(request.signal ? { signal: request.signal } : {}),
   })) as unknown
@@ -269,7 +271,7 @@ export function registerPromptSection(
   ctx: HostContext,
   options: PromptSectionOptions,
 ): PromptSectionHandle | null {
-  const systemPrompt = ctx['systemPrompt']
+  const systemPrompt = hostService(ctx, 'systemPrompt')
   const section = method(systemPrompt, 'section')
   if (!section) return null
   try {

@@ -43,7 +43,7 @@ export function dailyUsage(rows: readonly Row[], nowMs: number, config: Config):
 
 /** Replay remaining source events, preserving the current personality and explicit reset baseline. */
 export function rebuildAffect(repos: Repositories, config: Config, principalId: string, nowMs: number): AffectSnapshot {
-  const rows = repos.activeAffectEvents(principalId).sort((a, b) => Number(a['event_time_ms']) - Number(b['event_time_ms']) || Number(a['seq']) - Number(b['seq']))
+  const rows = repos.activeAffectEvents(principalId).sort((a, b) => Number(a['event_time_ms']) - Number(b['event_time_ms']) || String(a['id']).localeCompare(String(b['id'])))
   const stored = repos.getSnapshot(principalId)
   const baseline = repos.getSetting(`affect.baseline:${principalId}`)
   let state = baseline === undefined

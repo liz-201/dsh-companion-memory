@@ -89,6 +89,7 @@ const retriever = new Retriever(repos, config.memory)
 const updater = new FactUpdater(repos, config.memory)
 
 let modelCalls = 0
+let foregroundCalls = 0, repairCalls = 0
 let replayNow = T0
 const requestMeasurements = []
 const coordinator = new TurnCoordinator({
@@ -105,11 +106,17 @@ const coordinator = new TurnCoordinator({
     return { kind: 'accepted', platformMessageId: `replay-${sent.length}`, atMs: replayNow }
   },
   callModel: async function* (request) {
+    if (request.turnId.startsWith('repair:')) {
+      modelCalls++; repairCalls++
+      yield { text: JSON.parse(request.userText).draft }
+      return
+    }
     const { estimateTokens } = await import('../lib/runtime/context-budget.js')
     const total = estimateTokens(request.systemText) + estimateTokens(request.userText) + 12
     requestMeasurements.push(total)
     if (total > config.memory.inputHardLimitTokens) throw new Error(`完整请求超预算：${total}`)
-    const text = renderModelOutput(modelCalls++)
+    modelCalls++
+    const text = renderModelOutput(foregroundCalls++)
     const step = Math.max(1, Math.floor(text.length / 4))
     for (let offset = 0; offset < text.length; offset += step) {
       yield { text: text.slice(offset, offset + step) }
@@ -161,7 +168,9 @@ const counts = repos.counts()
 // 记忆写入必须真的发生过：全部 hint 被拒说明写入链路没通（§24：不能只看文件存在）。
 if (counts.memories === 0) failures.push({ turn: -1, reason: '记忆从未写入：memory hint 全部被拒' })
 if (sent.length !== turns) failures.push({ turn: -1, reason: `发送条数 ${sent.length} 与轮数 ${turns} 不一致` })
-if (modelCalls !== turns) failures.push({ turn: -1, reason: `模型调用 ${modelCalls} 与轮数 ${turns} 不一致` })
+if (foregroundCalls !== turns) failures.push({ turn: -1, reason: `前台模型调用 ${foregroundCalls} 与轮数 ${turns} 不一致` })
+const auditedRepairs = Number(db.get('SELECT COALESCE(SUM(repair_calls),0) AS n FROM expression_audits')?.n ?? 0)
+if (repairCalls !== auditedRepairs) failures.push({ turn: -1, reason: '修复调用与审计不一致' })
 const result = {
   generatedAt: new Date().toISOString(),
   turns,
@@ -174,6 +183,8 @@ const result = {
   ledger: ledger.summary(),
   sentMessages: sent.length,
   modelCalls,
+  foregroundCalls,
+  repairCalls,
   maxEstimatedRequestTokens: Math.max(0, ...requestMeasurements),
 }
 

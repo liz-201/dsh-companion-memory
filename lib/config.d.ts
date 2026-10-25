@@ -4,6 +4,7 @@
  * 不引入 schemastery 等外部依赖：宿主 patch 层把 config 作为普通对象传进来，
  * 这里给出**可读的字段级错误**，绝不静默回落到不安全的空值。
  */
+import { type PersonalityOptions } from './domain/personality-profile.js';
 export type PresetId = 'irritable' | 'balanced' | 'gentle';
 export type CompanionScope = 'owner_private' | 'owner_all';
 export type DeliveryMode = 'bridge' | 'early';
@@ -49,6 +50,8 @@ export interface AffectConfig {
     dailyAbsoluteDeltaCaps: Record<'affection' | 'trust' | 'respect' | 'grievance', number>;
 }
 export interface ProactiveConfig {
+    opportunityThreshold: number;
+    shareSources: string[];
     enabled: boolean;
     timezone: string;
     quietStart: string;
@@ -69,9 +72,19 @@ export interface BackgroundConfig {
 }
 export interface StorageConfig {
     directory: string;
+    transferDirectory: string;
+    syncIntervalSeconds: number;
     backupDaily: boolean;
     backupRetentionDays: number;
     busyTimeoutMs: number;
+}
+export interface CloudConfig {
+    enabled: boolean;
+    syncOnStartup: boolean;
+    startupTimeoutSeconds: number;
+    autoUpload: boolean;
+    intervalSeconds: number;
+    credentialFile: string;
 }
 export interface ObservabilityConfig {
     includeMessageContentByDefault: boolean;
@@ -90,13 +103,25 @@ export interface ChannelConfig {
     accessToken: string;
 }
 export interface IntegrationConfig {
+    naturalExpression: boolean;
     enabled: boolean;
     mode: 'augment' | 'standalone';
     localOwner: boolean;
     excludedAgentIds: string[];
     contextBudgetTokens: number;
+    /** Stable role override; empty follows the host preset or persona text. */
+    personaId: string;
+    personaPresets: Record<string, PresetId>;
 }
 export interface Config {
+    personality: PersonalityOptions;
+    expression: {
+        mode: 'enforce' | 'diagnostic';
+        repairMaxCallsPerTurn: number;
+        repairMaxCallsPerDay: number;
+        historyTurns: number;
+        auditRetentionDays: number;
+    };
     integration: IntegrationConfig;
     companion: CompanionConfig;
     generation: GenerationConfig;
@@ -105,6 +130,7 @@ export interface Config {
     proactive: ProactiveConfig;
     background: BackgroundConfig;
     storage: StorageConfig;
+    cloud: CloudConfig;
     observability: ObservabilityConfig;
     channel: ChannelConfig;
 }

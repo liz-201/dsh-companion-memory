@@ -18,8 +18,12 @@ import type { Config } from '../config.js'
 import type { IdentityBinding, AffectSnapshot } from '../domain/types.js'
 import { PRESETS, INITIAL_RELATIONSHIP, initialSnapshot, projectSnapshot, summarizeState } from '../domain/affect-reducer.js'
 import { rebuildAffect } from '../domain/affect-projector.js'
+import { personalityPreset } from '../domain/personality.js'
+import { PersonalityProfiles } from '../storage/personality-profiles.js'
+import { randomUUID } from 'node:crypto'
 import type { Database } from '../storage/database.js'
 import type { Repositories } from '../storage/repositories.js'
+import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
 import { backupNow, backupSummary, backupDirectory } from '../storage/backup.js'
 import { deleteScope } from '../storage/deletion.js'
 import { migrationStatus } from '../storage/migrations.js'
@@ -28,6 +32,7 @@ import type { FactUpdater } from '../memory/fact-updater.js'
 import type { Metrics } from '../runtime/metrics.js'
 import type { CompatibilityReport } from '../adapters/compatibility.js'
 import { describeCompatibility } from '../adapters/compatibility.js'
+import type { MemoryTransfer } from '../cloud/memory-transfer.js'
 
 export type FishCommandKind = 'success' | 'error'
 
@@ -56,6 +61,9 @@ export interface SchedulerStatus {
 }
 
 export interface FishCommandDeps {
+  transfer?: MemoryTransfer
+  manageUrl?: () => string
+  publishLocal?: () => string | null
   review?: { begin: (fixture: string) => string; end: () => string }
   config: Config
   repos: Repositories
@@ -84,15 +92,22 @@ const HELP_TEXT = [
   '/fish forget <记忆ID> --confirm — 忘掉一条记忆',
   '/fish correct <事件序号> <说明> — 更正一条影响关系的判断',
   '/fish personality irritable|balanced|gentle — 换性格（owner）',
+  '/fish personality show | mix gentle=.45 earnest=.35 playful=.20 — 组合人格',
+  '/fish expression why — 表达检查与降级记录',
+  '/fish habits list | forget <id> — 交流习惯',
   '/fish proactive on|off — 开关主动消息（owner）',
+  '/fish proactive why | pause | resume | device take — 主动原因与设备接管',
   '/fish reset relationship --confirm — 关系归零（owner）',
-  '/fish export — 导出记忆与状态',
+  '/fish export — 导出完整记忆文件并安排网盘上传（owner）',
+  '/fish import <文件路径> — 导入完整记忆文件（owner）',
+  '/fish files — 打开记忆导入导出与网盘管理页（owner）',
+  '/fish sync — 检查云端并同步（owner）',
   '/fish doctor — 自检',
   '/fish review begin friendly|tense|after_conflict / end — 隔离测试场景',
 ].join('\n')
 
 /** 命令名 → 是否需要 owner。 */
-const OWNER_ONLY = new Set(['review', 'personality', 'proactive', 'reset', 'forget', 'correct'])
+const OWNER_ONLY = new Set(['review', 'personality', 'proactive', 'reset', 'forget', 'correct', 'habits', 'expression', 'export', 'import', 'files', 'sync'])
 
 function fail(text: string): FishCommandResult {
   return { kind: 'error', text }
@@ -163,8 +178,18 @@ export function handleFishCommand(input: FishCommandInput, deps: FishCommandDeps
   if (OWNER_ONLY.has(name) && !input.isOwner) {
     return fail('这条命令只能在 owner 私聊里用。')
   }
+  if (deps.transfer && !deps.transfer.isReady && ['export', 'import'].includes(name)) return fail('启动记忆同步正在进行，请完成后再导入导出。')
 
   switch (name) {
+    case 'expression':
+      return ok(JSON.stringify({ mode: deps.config.expression.mode, recent: deps.db.all('SELECT mode, issues_json, status, repair_calls, latency_ms FROM expression_audits WHERE principal_id = ? ORDER BY created_at_ms DESC LIMIT 3', input.binding.principalId) }, null, 2))
+    case 'habits': {
+      if (args[0] === 'forget' && args[1]) {
+        const updated = deps.db.run("UPDATE expression_habits SET status = 'revoked' WHERE id = ? AND principal_id = ?", args[1], input.binding.principalId)
+        return updated.changes ? ok('已撤销这条交流习惯。', true) : fail('没有找到这条习惯。')
+      }
+      return ok(JSON.stringify(deps.db.all('SELECT id, kind, value_json, status, source_ids_json FROM expression_habits WHERE principal_id = ? ORDER BY valid_from_ms DESC LIMIT 20', input.binding.principalId), null, 2))
+    }
     case 'review':
       if (!deps.review) return fail('当前入口不支持 review。')
       try {
@@ -193,7 +218,29 @@ export function handleFishCommand(input: FishCommandInput, deps: FishCommandDeps
     case 'reset':
       return commandReset(deps, input, flag(rest, 'confirm'))
     case 'export':
+      if (deps.transfer) {
+        try {
+          const result = deps.transfer.exportLocal()
+          return ok(`完整记忆文件：${result.file}\n原文 ${result.messages} 条，记忆 ${result.memories} 条。${result.upload === 'queued' ? '\n已安排网盘同步，可在管理页查看结果。' : ''}\n导出下载与网盘管理：${deps.manageUrl?.() ?? '/companion-memory/manage'}`)
+        } catch { return fail('记忆导出失败，请检查存储目录权限。') }
+      }
       return commandExport(deps, input)
+    case 'files':
+      return ok(`记忆导入导出与百度网盘：${deps.manageUrl?.() ?? '/companion-memory/manage'}`)
+    case 'sync': {
+      if (!deps.transfer) return fail('当前入口未挂载记忆同步服务。')
+      const file = deps.publishLocal?.()
+      void deps.transfer.sync()
+      return ok(`${file ? `同步文件：${file}` : '本机同步服务已就绪。'}\n${deps.transfer.status().enabled ? '已安排云端检查与同步。' : '百度网盘尚未连接。'}查看进度：${deps.manageUrl?.() ?? '/companion-memory/manage'}`)
+    }
+    case 'import':
+      if (!deps.transfer) return fail('当前入口未挂载记忆导入服务。')
+      if (!args.length) return ok(`在这里选择要导入的记忆文件：${deps.manageUrl?.() ?? '/companion-memory/manage'}`)
+      try {
+        const result = deps.transfer.importFile(args.join(' ').replace(/^"|"$/g, ''))
+        if (deps.transfer.status().enabled) void deps.transfer.sync()
+        return ok(`记忆导入完成：新增 ${result.inserted}，更新 ${result.updated}，冲突 ${result.conflicts}。${result.alreadyImported ? '该文件已处理。' : ''}${result.lineageMissing ? '缺少共同历史，差异已保留。' : ''}`, true)
+      } catch { return fail('记忆导入失败：请检查文件、版本及所属主人；本地记忆已保留。') }
     case 'doctor':
       return commandDoctor(deps, input)
     default:
@@ -205,7 +252,7 @@ export function handleFishCommand(input: FishCommandInput, deps: FishCommandDeps
 function commandStatus(deps: FishCommandDeps, input: FishCommandInput): FishCommandResult {
   const { repos, config, metrics } = deps
   const counts = repos.counts()
-  const lines = [`状态 · ${config.companion.name}（${config.companion.preset}）`]
+  const lines = [`状态 · ${config.companion.name}（${personalityPreset(repos, config, input.binding.principalId)}）`]
   lines.push(`记忆：${counts['memories'] ?? 0} 条 · 原文：${counts['raw_messages'] ?? 0} 条`)
   lines.push(`对话轮次：${counts['turns'] ?? 0} · 情感事件：${counts['affect_events'] ?? 0}`)
   lines.push(`任务：${counts['tasks'] ?? 0} · 待发：${counts['outbox'] ?? 0}`)
@@ -349,6 +396,7 @@ function commandForget(
     { kind: 'memory', memoryId: id },
     input.nowMs,
     deps.config.storage.backupRetentionDays,
+    deps.config,
   )
   const notes = result.notes.length > 0 ? `\n${result.notes.join('\n')}` : ''
   return ok(`忘掉了：${result.removedMemories.length} 条记忆、${result.removedMessages.length} 条原文。${notes}`, true)
@@ -397,12 +445,51 @@ function commandPersonality(
   input: FishCommandInput,
   args: readonly string[],
 ): FishCommandResult {
+  const persona = deps.repos.getSetting(`persona.id:${input.binding.principalId}`) ?? 'builtin'
+  const profiles = new PersonalityProfiles(deps.repos)
+  if (args[0] === 'show') return ok(JSON.stringify(profiles.get(deps.config.companion.id, persona) ?? { legacy: currentSnapshot(deps, input.binding, input.nowMs).personality }, null, 2))
+  if (args[0] === 'set') {
+    try {
+      const overrides: Record<string, number> = {}
+      for (const entry of args.slice(1)) {
+        const match = /^([a-zA-Z]+)=(\d*\.?\d+)$/.exec(entry)
+        if (!match || Object.hasOwn(overrides, match[1]!)) throw new Error('用法：personality set reserve=.65 warmth=.8')
+        overrides[match[1]!] = Number(match[2])
+      }
+      if (!Object.keys(overrides).length) throw new Error('至少指定一个维度')
+      const stored = deps.repos.getSnapshot(input.binding.principalId), base = currentSnapshot(deps, input.binding, input.nowMs)
+      const previous = profiles.get(deps.config.companion.id, persona)
+      const profile = profiles.configure(deps.config.companion.id, persona, previous?.traits ?? base.personality, { mix: Object.fromEntries(previous?.templates.map(item => [item.id, item.weight]) ?? []), overrides: { ...previous?.explicitOverrides, ...overrides }, variation: { enabled: previous?.seed !== null && previous?.seed !== undefined, maxDelta: .05, seed: previous?.seed ?? null } }, input.nowMs)
+      const personality = Object.fromEntries(Object.keys(base.personality).map(key => [key, profile.traits[key as keyof typeof profile.traits]])) as unknown as typeof base.personality
+      deps.repos.putSnapshot({ ...base, personality, revision: (stored?.revision ?? 0) + 1 }, stored?.revision ?? 0)
+      return ok('人格维度已保存。', true)
+    } catch (error) { return fail(String(error)) }
+  }
+  if (args[0] === 'mix') {
+    try {
+      const mix: Record<string, number> = {}
+      for (const entry of args.slice(1)) {
+        const match = /^([a-z]+)=(\d*\.?\d+)$/.exec(entry)
+        if (!match || Object.hasOwn(mix, match[1]!)) throw new Error('用法：personality mix gentle=.45 earnest=.35 playful=.20')
+        mix[match[1]!] = Number(match[2])
+      }
+      if (!Object.keys(mix).length) throw new Error('至少指定一个模板及权重')
+      const stored = deps.repos.getSnapshot(input.binding.principalId)
+      const base = currentSnapshot(deps, input.binding, input.nowMs)
+      const profile = profiles.configure(deps.config.companion.id, persona, base.personality, { mix, overrides: {}, variation: { enabled: false, maxDelta: .05, seed: null } }, input.nowMs)
+      const personality = Object.fromEntries(Object.keys(base.personality).map(key => [key, profile.traits[key as keyof typeof profile.traits]])) as unknown as typeof base.personality
+      deps.repos.putSnapshot({ ...base, personality, revision: (stored?.revision ?? 0) + 1 }, stored?.revision ?? 0)
+      return ok(`人格组合已保存：${JSON.stringify(mix)}`, true)
+    } catch (error) { return fail(String(error)) }
+  }
   const preset = (args[0] ?? '').toLowerCase()
   if (preset !== 'irritable' && preset !== 'balanced' && preset !== 'gentle') {
     return fail('可选性格：irritable / balanced / gentle')
   }
   const personality = PRESETS[preset]
-  deps.repos.setSetting('companion.preset', preset, input.nowMs)
+  profiles.configure(deps.config.companion.id, persona, personality, { mix: {}, overrides: { ...(profiles.get(deps.config.companion.id, persona)?.traits ?? {}), ...personality }, variation: { enabled: false, maxDelta: .05, seed: null } }, input.nowMs)
+  deps.repos.setSetting(`personality.preset:${input.binding.principalId}`, preset, input.nowMs)
+  deps.repos.setSetting(`personality.default:${input.binding.principalId}`, preset, input.nowMs)
   const companion = deps.repos.ensureCompanion(
     deps.config.companion.id,
     deps.config.companion.name,
@@ -444,8 +531,27 @@ function commandProactive(
   args: readonly string[],
 ): FishCommandResult {
   const value = (args[0] ?? '').toLowerCase()
-  if (value !== 'on' && value !== 'off') return fail('用法：/fish proactive on|off')
-  const enabled = value === 'on'
+  if (value === 'feedback' && args[1] && args[2]) {
+    const kinds = ['positive', 'negative', 'busy', 'explicit_preference', 'unrelated', 'unknown']
+    if (!kinds.includes(args[2])) return fail('无效反馈类型。')
+    const row = deps.db.get<Record<string, unknown>>('SELECT * FROM proactive_feedback WHERE id = ? AND principal_id = ?', args[1], input.binding.principalId)
+    if (!row) return fail('未找到当前角色的反馈记录。')
+    deps.db.run('INSERT INTO proactive_feedback VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?, ?, ?)', randomUUID(), row['opportunity_id'], row['outbox_id'], input.binding.principalId, args[2], `owner correction: ${args[2]}`, 'feedback-owner-v1', args[1], input.nowMs)
+    return ok('已更正反馈归因，接受倾向将从有效记录重算。', true)
+  }
+  if (value === 'device' && args[1] === 'take') {
+    const device = deps.repos.getSetting('local.device-id')
+    if (!device) return fail('当前设备尚未注册。')
+    const previous = deps.db.get<{ revision_id: string; conflict_json: string | null }>('SELECT revision_id, conflict_json FROM proactive_ownership WHERE companion_id = ?', deps.config.companion.id)
+    const parents = [...new Set([...(previous ? [previous.revision_id] : []), ...(previous?.conflict_json ? JSON.parse(previous.conflict_json) as string[] : [])])]
+    deps.db.run('INSERT INTO proactive_ownership VALUES (?, ?, ?, ?, NULL) ON CONFLICT(companion_id) DO UPDATE SET active_device_id = excluded.active_device_id, revision_id = excluded.revision_id, parent_revision_ids_json = excluded.parent_revision_ids_json, conflict_json = NULL', deps.config.companion.id, device, randomUUID(), JSON.stringify(parents))
+    return ok('本机已接管主动发送。旧电脑在收到同步前仍可能发送，请先在旧机暂停或完成同步。', true)
+  }
+  if (value === 'why') return ok(JSON.stringify({ device: deps.db.get('SELECT * FROM proactive_ownership WHERE companion_id = ?', deps.config.companion.id), opportunities: deps.db.all('SELECT kind, summary, status, not_before_ms, expires_at_ms FROM proactive_opportunities WHERE principal_id = ? ORDER BY created_at_ms DESC LIMIT 10', input.binding.principalId) }, null, 2))
+  const resolved = value === 'pause' ? 'off' : value === 'resume' ? 'on' : value
+  if (resolved !== 'on' && resolved !== 'off') return fail('用法：/fish proactive on|off|pause|resume|why|device take')
+  const enabled = resolved === 'on'
+  if (!enabled) deps.db.run(`UPDATE outbox SET status = 'cancelled' WHERE ${SPONTANEOUS_OUTBOX} AND status = 'pending'`)
   deps.repos.setSetting('proactive.enabled', enabled ? '1' : '0', input.nowMs)
   deps.scheduler?.setEnabled(enabled)
   deps.repos.audit({
@@ -465,7 +571,7 @@ function commandReset(deps: FishCommandDeps, input: FishCommandInput, confirmed:
   const stored = deps.repos.getSnapshot(input.binding.principalId)
   const fresh = initialSnapshot(
     input.binding.principalId,
-    deps.config.companion.preset,
+    personalityPreset(deps.repos, deps.config, input.binding.principalId),
     deps.config.affect.ruleVersion,
     input.nowMs,
   )

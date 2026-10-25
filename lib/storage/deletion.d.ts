@@ -9,6 +9,7 @@
  */
 import type { Database } from './database.js';
 import type { Repositories } from './repositories.js';
+import type { Config } from '../config.js';
 export type DeleteSelector = {
     kind: 'memory';
     memoryId: string;
@@ -34,9 +35,9 @@ export interface DeleteResult {
     /** 说明哪些副本不在本次删除范围内（备份窗口）。 */
     notes: string[];
 }
-export declare function deleteScope(db: Database, repos: Repositories, principalId: string, selector: DeleteSelector, nowMs: number, backupKeepDays: number): DeleteResult;
+export declare function deleteScope(db: Database, repos: Repositories, principalId: string, selector: DeleteSelector, nowMs: number, backupKeepDays: number, config?: Config): DeleteResult;
 /** 恢复备份后调用：把 tombstone 里记录过的行再次清掉。 */
-export declare function replayTombstones(db: Database, repos: Repositories, nowMs: number): {
+export declare function replayTombstones(db: Database, repos: Repositories, nowMs: number, config?: Config): {
     replayed: number;
     removedMemories: number;
 };

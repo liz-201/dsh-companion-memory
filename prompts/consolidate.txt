@@ -7,3 +7,8 @@
 不得直接改人格、关系数值、权限或收件人。不要删除无关原文。限制输出条数与长度，未处理范围返回游标供下次继续。
 
 输出 JSON：{"changes":[{"kind":"fact|preference|interaction_rule|episode|hypothesis","subject":"主题键或 null","predicate":"谓语键或 null","object":任意 JSON,"claim":"一句话陈述","sourceMessageIds":["本批消息 id"],"quote":"原话摘录","confidence":0到1,"salience":0到1,"eventAtMs":毫秒或 null,"relation":"updates|contradicts|supports|derived_from"}],"cursor":本批处理到的 seq 或 null,"summary":"可选的状态摘要或 null"}。
+
+最小正确样例（实际 ID、seq 和引文须从当前输入取，不得照抄）：
+输入：[msg-7] seq=7 user: 我住在杭州，平时喜欢喝冰美式。
+输出：{"changes":[{"kind":"fact","subject":"用户","predicate":"居住地","object":"杭州","claim":"用户住在杭州","sourceMessageIds":["msg-7"],"quote":"我住在杭州","confidence":0.9,"salience":0.6,"eventAtMs":null}],"cursor":7,"summary":null}
+没有可提炼内容也必须输出 changes 数组，例如处理到 seq=9：{"changes":[],"cursor":9,"summary":null}。禁止输出解释、多个独立 JSON 或 Markdown 围栏。cursor 不能回退到本批之前，也不能跳过尚未提供的消息。

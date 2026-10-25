@@ -1,6 +1,6 @@
 {
   "name": "dsh-companion-memory",
-  "version": "0.1.1",
+  "version": "0.3.0-dev.4",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
@@ -18,7 +18,8 @@
     "LICENSE",
     "integration",
     "scripts",
-    "docs"
+    "docs",
+    "tests/fixtures"
   ],
   "description": "Companion memory, affect continuity and QQ output protocol for DeepSeek Harness: local SQLite authority, evidence-backed long-term memory, reducible emotional state, proactive outbox.",
   "keywords": [
@@ -56,6 +57,7 @@
     "bench:live": "node scripts/benchmark.mjs --mode live --smoke",
     "replay": "node scripts/replay.mjs",
     "package": "node scripts/package.mjs",
+    "memory:files": "node scripts/memory-transfer.mjs serve",
     "bridge:check": "node scripts/patch-qq-bridge.mjs",
     "bridge:verify": "node scripts/verify-qq-bridge.mjs"
   },

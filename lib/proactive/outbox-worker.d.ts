@@ -50,6 +50,8 @@ export interface OutboxWorkerOptions {
     chatForConversation: (conversationId: string) => string | null;
     now?: () => number;
     limit?: number;
+    send?: (conversationId: string, content: string, key: string, expectedSeq: number | null) => Promise<DeliveryReceipt>;
+    targetBusy?: (conversationId: string) => boolean;
 }
 export declare class OutboxWorker {
     private readonly options;

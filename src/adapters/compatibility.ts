@@ -10,6 +10,8 @@
  *   · 每个降级结论都带人话说明，直接进 doctor 与 docs/COMPATIBILITY.md。
  */
 
+import { hostService } from './host-service.js'
+
 export type CapabilityId =
   | 'systemPrompt'
   | 'tools'
@@ -49,7 +51,7 @@ interface LooseContext {
 
 function has(ctx: LooseContext, key: string): boolean {
   try {
-    return ctx[key] !== undefined && ctx[key] !== null
+    return hostService(ctx, key) != null
   } catch {
     return false
   }
@@ -71,7 +73,7 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
   const blocked: string[] = []
   const degraded: string[] = []
 
-  const systemPrompt = root['systemPrompt']
+  const systemPrompt = hostService(root, 'systemPrompt')
   const systemPromptOk = callable(systemPrompt, 'section') || callable(systemPrompt, 'variable')
   capabilities.push({
     id: 'systemPrompt',
@@ -81,7 +83,7 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
   })
   
 
-  const tools = root['tools']
+  const tools = hostService(root, 'tools')
   const toolsOk = callable(tools, 'register')
   capabilities.push({
     id: 'tools',
@@ -90,13 +92,13 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
     detail: toolsOk ? 'ctx.tools.register 可用' : '没有 tools 服务：fish_* 工具不注册，命令走 QQ 桥',
   })
 
-  const sessions = root['sessions']
+  const sessions = hostService(root, 'sessions')
   const agentsOk = has(root, 'agents')
   capabilities.push({
     id: 'agents',
     available: agentsOk,
     level: agentsOk ? 'full' : 'none',
-    detail: agentsOk ? 'ctx.agents 存在，可按 Agent 作用域安装适配' : '按已绑定 QQ 请求隔离，不向其他 Agent 注册人格',
+    detail: agentsOk ? 'ctx.agents 存在，可按 Agent 作用域安装适配' : '普通会话按事件携带的 Agent/session 隔离，QQ 按白名单绑定',
   })
   
 
@@ -108,7 +110,7 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
     detail: sessionsOk ? 'ctx.sessions 存在（历史投影/会话读写能力需逐个方法确认）' : '没有 sessions 服务：本地消息表是唯一历史来源',
   })
 
-  const commands = root['commands']
+  const commands = hostService(root, 'commands')
   const commandsOk = callable(commands, 'register')
   capabilities.push({
     id: 'commands',
@@ -117,7 +119,7 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
     detail: commandsOk ? 'ctx.commands.register 可用，可注册 /fish 子命令' : '没有 commands 服务：/fish 只能由 QQ 桥的斜杠路由分发',
   })
 
-  const llm = root['llm']
+  const llm = hostService(root, 'llm')
   const llmOk = callable(llm, 'stream')
   capabilities.push({
     id: 'llm',
@@ -137,10 +139,10 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
     id: 'agentLoopEvent',
     available: onEvent,
     level: onEvent ? 'partial' : 'none',
-    detail: onEvent ? '可用 ctx.on 订阅 agent 事件（具体事件名按宿主版本核对）' : '未订阅 agent 事件：回合数据由 QQ 桥提供',
+    detail: onEvent ? '已支持 agent/inbox/claimed 与 session/event；需宿主实际发送事件' : '没有事件接口：普通 DSH 会话无法自动记录，QQ 桥仍可提供回合数据',
   })
 
-  const webServer = root['webServer']
+  const webServer = hostService(root, 'webServer')
   const webOk = callable(webServer, 'register')
   capabilities.push({
     id: 'webServer',
@@ -183,7 +185,7 @@ export function probeCapabilities(ctx: unknown, options: { onebotHttpBase?: stri
 
 function readHostVersion(ctx: LooseContext): string | null {
   for (const key of ['host', 'app', 'runtime']) {
-    const value = ctx[key]
+    const value = hostService(ctx, key)
     if (value !== null && typeof value === 'object') {
       const version = (value as LooseContext)['version']
       if (typeof version === 'string') return version

@@ -7,11 +7,12 @@
  *    文件不存在时只报 WARN，不会创建它。
  *  - 每一项都给出可复现的证据（路径、PRAGMA 结果、计数），失败项返回退出码 1。
  *
- * 用法：node scripts/doctor.mjs [--json]
+ * 用法：node scripts/doctor.mjs [--json] [--config <JSON/YAML 文件>]
  */
 import { existsSync, readdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { doctorConfig } from './doctor-config.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const jsonOut = process.argv.includes('--json')
@@ -28,10 +29,11 @@ async function main() {
   // 1) 配置可解析（坏配置必须在这里就暴露，而不是等运行时）
   let config
   try {
-    config = resolveConfig(undefined)
-    add('ok', '配置解析', `companion=${config.companion.id} preset=${config.companion.preset}`, 'resolveConfig(undefined)')
+    const input = doctorConfig(process.argv.slice(2), dshHome())
+    config = resolveConfig(input.raw)
+    add(input.defaults ? 'warn' : 'ok', '配置解析', `companion=${config.companion.id} preset=${config.companion.preset}`, input.evidence)
   } catch (error) {
-    add('fail', '配置解析', String(error?.message ?? error), 'resolveConfig(undefined)')
+    add('fail', '配置解析', String(error?.message ?? error), '--config / desktop profile')
     return report()
   }
 
@@ -76,14 +78,14 @@ async function main() {
       const applied = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
       const latest = applied.length > 0 ? String(applied[applied.length - 1].version) : 'none'
       add(applied.length > 0 ? 'ok' : 'fail', '迁移版本', `已应用 ${applied.length} 个，最新 ${latest}`, 'schema_migrations')
-      const fts = db.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'memories_fts%'").all()
-      add(fts.length > 0 ? 'ok' : 'warn', 'FTS5 索引', fts.length > 0 ? `${fts.length} 个对象` : '缺失（退化为 LIKE 检索）', "sqlite_master LIKE 'memories_fts%'")
+      const fts = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'").all()
+      add(fts.length > 0 ? 'ok' : 'warn', 'FTS5 索引', fts.length > 0 ? 'memory_fts 存在' : '缺失（退化为 LIKE 检索）', 'sqlite_master: memory_fts')
       for (const [label, sql] of [
         ['记忆条数', 'SELECT COUNT(*) AS n FROM memories'],
         ['原文条数', 'SELECT COUNT(*) AS n FROM raw_messages'],
         ['待发 outbox', "SELECT COUNT(*) AS n FROM outbox WHERE status IN ('pending','sending','unknown')"],
         ['未完成任务', "SELECT COUNT(*) AS n FROM tasks WHERE status IN ('proposed','confirmed','due')"],
-        ['背景任务积压', "SELECT COUNT(*) AS n FROM background_jobs WHERE status IN ('queued','running')"]
+        ['背景任务积压', "SELECT COUNT(*) AS n FROM background_jobs WHERE status IN ('pending','leased')"]
       ]) {
         try {
           const row = db.prepare(sql).get()
@@ -92,6 +94,10 @@ async function main() {
           add('warn', label, `查询失败：${String(error?.message ?? error)}`, sql)
         }
       }
+      const failures = db.prepare("SELECT COUNT(*) AS n FROM background_jobs WHERE kind = 'extract' AND status = 'failed'").get()
+      add(failures.n ? 'warn' : 'ok', '记忆抽取失败', `${failures.n} 个终止任务`, "background_jobs: extract / failed")
+      const stale = db.prepare("SELECT COUNT(*) AS n FROM affect_snapshots a JOIN conversations c ON c.principal_id = a.principal_id JOIN raw_messages r ON r.conversation_id = c.id WHERE r.role = 'user' AND r.deleted_at_ms IS NULL AND r.seq > a.projected_through_seq AND r.observed_at_ms > a.as_of_ms AND a.as_of_ms < ?").get(Date.now() - 6 * 3600000)
+      add(stale.n ? 'warn' : 'ok', '情绪观察进度', stale.n ? `${stale.n} 条消息晚于超过 6 小时未推进的快照` : '没有陈旧且积压的快照', 'affect_snapshots + raw_messages')
     } catch (error) {
       add('fail', '数据库打开', String(error?.message ?? error), file)
     } finally {
@@ -104,14 +110,15 @@ async function main() {
   const sessionsOk = typeof sessionsFile === 'string' && existsSync(sessionsFile)
   add(sessionsOk ? 'ok' : 'warn', 'chat-sessions 映射', sessionsOk ? sessionsFile : '未找到（QQ 侧会话定位不可用）', String(sessionsFile))
   const owners = config.channel.ownerChats ?? []
-  add(owners.length > 0 ? 'ok' : 'warn', 'owner 会话白名单', owners.length > 0 ? owners.join(', ') : '为空（不主动发消息）', 'config.channel.ownerChats')
+  add(owners.length > 0 || config.integration.localOwner ? 'ok' : 'warn', 'owner 会话白名单', owners.length > 0 ? owners.join(', ') : 'QQ 白名单为空；桌面本地绑定独立生效', 'config.channel.ownerChats')
+  add('ok', '主动消息', config.proactive.enabled ? '已启用（仍需投递通道可用）' : '配置已关闭', 'config.proactive.enabled')
 
   // 6) 备份
   const backupDir = join(dir, 'backups')
   if (!existsSync(backupDir)) {
     add('warn', '备份', '尚无备份目录', backupDir)
   } else {
-    const files = readdirSync(backupDir).filter((name) => name.endsWith('.db'))
+    const files = readdirSync(backupDir).filter((name) => /\.(?:sqlite3|db)$/i.test(name))
     add(files.length > 0 ? 'ok' : 'warn', '备份', `${files.length} 个文件`, backupDir)
   }
 
