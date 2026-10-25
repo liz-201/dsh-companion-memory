@@ -34,6 +34,64 @@ node scripts/dsh-bridge.mjs read --session <会话ID>
 
 建议为协作建立专用会话。由 Codex 分配明确的审查、定位或修改任务，DeepSeek 返回文件位置、补丁与验证结果，Codex 检查后整合。同一时刻为两者划分文件范围，避免同时修改同一文件。仅安装桥接不会自动分发任务，也不会使当前聊天在结束后持续运行；后续有新任务时可以继续调用同一个 DSH 会话。
 
+## DSH 主动联系 Codex
+
+桥接 0.2.0 增加本机持久收件箱。DSH 可以主动发请求，Codex 消费后将回复送回发件会话，不需要用户复制消息。数据保存在 `~/.dsh/codex-bridge/mailbox.sqlite3`，不放进代码仓库，不另开网络端口，不需要新的模型 API Key。CLI 现在就能使用；可选的 DSH 系统上下文说明在下次加载 bundle 后对所有会话可见。
+
+DSH 先用文件工具写 UTF-8 请求，再运行：
+
+```powershell
+node scripts/codex-mailbox.mjs send --session <当前DSH会话ID> --file <请求.txt> --id <稳定消息ID>
+node scripts/codex-mailbox.mjs read --id <稳定消息ID>
+node scripts/codex-mailbox.mjs status
+```
+
+同一消息重试时沿用 id 和原文；不同内容必须用新 id。优先用 `--file`；Windows PowerShell 5 默认管道编码可能把中文变成问号。`--file -` 仅适合已经确保 UTF-8 的标准输入。
+
+Codex 活动期间读取并回复：
+
+```powershell
+node scripts/codex-mailbox.mjs receive --consumer <消费者名> --wait-ms 45000
+node scripts/codex-mailbox.mjs heartbeat --consumer <消费者名>
+node scripts/codex-mailbox.mjs reply --id <消息ID> --consumer <消费者名> --file <回复.txt>
+node scripts/codex-mailbox.mjs deliver
+node scripts/codex-mailbox.mjs offline --consumer <消费者名>
+```
+
+`receive` 最多等待 45 秒，领取的请求及消费者租约默认 90 秒；处理期间续约，过期后先重新领取。只允许一个有效消费者。`offline` 释放该消费者未答复的请求。回复先落库，再通过原有 DSH 鉴权 API 排队投递；断线后用 `deliver` 重试，同一回复复用同一个 DSH requestId，避免重复执行。命令退出码 2 表示回复已保存、DSH 投递待重试。
+
+| 状态 | 可确认的事实 |
+| --- | --- |
+| `pending` | 请求已保存，等待消费者领取 |
+| `claimed` | 消费者已领取，租约有效 |
+| `response-ready` | 回复已保存，等待送回 DSH |
+| `response-queued` | DSH 已接受回复，尚不能证明模型完成处理 |
+| `receiver.state=polling` | 消费者最近轮询，租约有效 |
+| `receiver.state=offline` | 无有效消费者；请求会保留 |
+
+**常驻接收与唤醒是不同能力。** 收件箱不自动启动模型，不能唤醒已结束的 ChatGPT/Work 聊天，`wakesCodex` 固定为 `false`。若要无人值守地在聊天结束后继续运行，需要另外运行受控的 Codex 驱动程序。官方 [Codex App Server](https://learn.chatgpt.com/docs/app-server) 提供 `thread/resume`、`turn/start` 等接口，但本插件没有自动启动另一个模型会话，也不把 CLI 登录状态当成本聊天可被唤醒的证明。
+
+2026-10-26 已在真实 DSH 专用协作会话中完成“DSH 主动发件 → Codex 读取 → 原会话收到回复 → DSH 再发确认”的闭环。
+
+## 有截止时间的自动接收进程
+
+`codex-mailbox-worker.mjs` 使用本机已登录的 Codex CLI，通过官方 stdio App Server 创建独立协作线程。它轮询同一个收件箱，逐条处理允许的 DSH 会话请求，再回信。它不向当前 Work 聊天注入回合，也不读取或导出登录凭据。
+
+```powershell
+# 在受控终端中运行；时间和会话按当次授权填写。
+node scripts/codex-mailbox-worker.mjs serve --until '2026-10-26T08:00:00+08:00' --session <DSH会话ID> --max-tasks 20 --codex <codex.exe绝对路径>
+node scripts/codex-mailbox-worker.mjs status
+node scripts/codex-mailbox-worker.mjs stop
+```
+
+截止时间必须在未来 12 小时内；最多 30 条请求，默认 12 条。默认每轮最多 10 分钟，截止或 stop 会中断活动轮次。空闲时只保留队列消费者，收到允许的请求后才建立独立的模型进程和线程，完成后关闭，避免长期持有闲置模型连接。它使用 CLI 当前配置的模型和登录；模型调用会消耗对应账号额度。网络沿用进程环境，必要时在启动它的终端中设置现有 `HTTP_PROXY` / `HTTPS_PROXY`，不改全局设置、不硬编码代理或凭据。
+
+发起前先让交互消费者 `offline`，避免两个消费者抢同一消息。状态文件位于收件箱旁的 `worker.json`；过期心跳或进程消失会显示 `offline-stale`。模型失败时保留请求及不确定轮次标记，拒绝未经核对的自动重跑；DSH 断线时回复继续保存在库里，之后可用 `deliver` 补投。
+
+白名单之外的会话不启动模型轮次。工作线程默认只获仓库写入范围、审批为 never，不代答权限问题，不自动创建其他代理或调度器；开发范围写在 `workerInstructions` 中。进程停止后不自动复活；未安装系统启动项或计划任务。电脑休眠、关闭终端或服务宿主退出会中断持续处理，未完成请求保留待恢复。
+
+本机桥接隔离回归 47 项通过，覆盖快速完成的通知顺序、跨线程串话防护、空闲不启动模型、停止/超时/失败、租约、去重、回复补投及异常退出后防重跑。真实 DSH 发件、独立 Codex 自动处理、回到 DSH 并收到确认的闭环已通过；此前一次真实轮次曾超时，保留诊断记录，尚不宣称长期稳定。持续运行以 `status` 和具体回执为准。
+
 ## 本机真实验收（2026-10-25）
 
 桌面端重启后，已通过原生本地 API 完成鉴权、创建会话、重命名、发送任务、读取工具结果和按 requestId 等待轮次结束。专用会话名为 `Codex × DeepSeek 插件协作`，会话 ID 为 `session-48b4abe9-ab62-42e9-86ab-60bb62eccfea`，工作目录为 `D:/dsh-plugins/dsh-companion-memory`。当时宿主记录的模型为 `deepseek-v4.1-flash`。

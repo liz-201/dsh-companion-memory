@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { publishConnection, mountConnectionDiscovery } from '../../integration/codex-bridge/index.mjs'
+import { publishConnection, mountConnectionDiscovery, mountMailboxInstructions } from '../../integration/codex-bridge/index.mjs'
 import { DshBridgeClient, localConnectionUrl } from '../../scripts/dsh-bridge-client.mjs'
 
 test('desktop publisher keeps credentials outside the repository and old teardown preserves the new generation', t => {
@@ -174,4 +174,29 @@ test('authentication errors and RPC failures never echo secrets or raw server er
   const failedRpc = new DshBridgeClient('http://127.0.0.1:1234/?token=secret-value', { fetchImpl: async () => new Response('secret-value', { status: 500 }) })
   failedRpc.cookie = 'operator=private'
   await assert.rejects(failedRpc.list(), error => !error.message.includes('secret-value') && !error.message.includes('private'))
+})
+
+test('optional mailbox instructions let every DSH session discover the reverse path without claiming wakeup', () => {
+  const sections = [], cleanup = []
+  let disposed = false, released = false
+  const child = { get: name => name === 'systemPrompt' ? { context(definition) { sections.push(definition); return () => { released = true } } } : undefined,
+    effect(fn) { cleanup.push(fn()) } }
+  const ctx = { inject(services, register) { assert.deepEqual(services, ['systemPrompt']); register(child); return { dispose() { disposed = true } } },
+    effect(fn) { cleanup.push(fn()) } }
+  mountMailboxInstructions(ctx)
+  assert.equal(sections.length, 1)
+  assert.equal(sections[0].interpolate, false)
+  const text = sections[0].text({})
+  assert.match(text, /codex-mailbox\.mjs/)
+  assert.match(text, /UTF-8/)
+  assert.match(text, /offline/)
+  assert.match(text, /不能唤醒/)
+  assert.doesNotMatch(text, /token=|api_key|secret/i)
+  for (const close of cleanup) close()
+  assert.equal(disposed, true)
+  assert.equal(released, true)
+})
+
+test('missing optional systemPrompt service never prevents bridge installation', () => {
+  assert.doesNotThrow(() => mountMailboxInstructions({ get: () => undefined }))
 })

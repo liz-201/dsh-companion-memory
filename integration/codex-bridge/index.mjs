@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, renameSync, readFileSync, unlinkSync } from '
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-codex-bridge'
 export const inject = ['connection', 'webServer']
@@ -58,4 +59,29 @@ export function mountConnectionDiscovery(ctx, directory) {
   }, 'codex-bridge: local connection discovery')
 }
 
-export function apply(ctx) { mountConnectionDiscovery(ctx) }
+export function mailboxInstructions() {
+  const script = fileURLToPath(new URL('../../scripts/codex-mailbox.mjs', import.meta.url))
+  const command = `node '${script.replaceAll("'", "''")}'`
+  return `本机已安装 Codex 双向协作收件箱。仅在用户授权的开发协作中使用，不发送凭据或无关私人对话。
+你可以主动给 Codex 投递请求，无需用户手工转述：先将内容写入 UTF-8 文件，再用 PowerShell 执行 ${command} send --session <当前真实DSH会话ID> --file <文件绝对路径> --id <本次稳定消息ID>。
+执行同一脚本的 status 查看消费者；read --id <消息ID> 查看回执和回复。回复会以 [Codex 协作回复 / mailbox ...] 排队返回原 DSH 会话。只在内容完全相同时重用消息ID，避免反复催问。
+pending=已保存待领取，claimed=已领取，response-ready=回复已保存待投递，response-queued=DSH已接受回复、未必已执行。polling只表示消费者最近轮询；offline时消息仍会保存，但此脚本不能唤醒已经结束的 ChatGPT/Codex 会话。不要把投递当成完成。PowerShell中文管道可能转码，优先使用UTF-8文件。`
+}
+
+export function mountMailboxInstructions(ctx) {
+  const register = child => {
+    const prompt = child.get?.('systemPrompt')
+    if (typeof prompt?.context !== 'function') return
+    const release = prompt.context({ name: 'codex-bridge:mailbox', order: 520, required: false, interpolate: false, text: mailboxInstructions })
+    if (typeof release === 'function') child.effect(() => release, 'codex-bridge: mailbox instructions')
+  }
+  if (typeof ctx.inject === 'function') {
+    const fiber = ctx.inject(['systemPrompt'], register)
+    ctx.effect(() => () => { void fiber.dispose() }, 'codex-bridge: optional system prompt')
+  } else register(ctx)
+}
+
+export function apply(ctx) {
+  mountConnectionDiscovery(ctx)
+  mountMailboxInstructions(ctx)
+}
