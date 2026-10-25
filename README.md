@@ -2,7 +2,7 @@
 
 可选：[Codex 与 DSH Desktop 直接协作桥接](docs/CODEX_BRIDGE.md)，通过本机 API 交换开发任务和结果。
 
-> **0.3.0-dev.4 开发版**：新增[一键记忆导入导出与百度网盘同步](docs/CLOUD_MEMORY_SYNC.md)。`/fish files` 打开管理页；连接网盘后，导出自动上传，启动自动检查并合并云端记忆。全量 259 项通过，真实账号授权与网盘验收待完成，见[验证记录](docs/CLOUD_MEMORY_VALIDATION.md)。[实施进度](docs/roadmap/v0.3/IMPLEMENTATION_PROGRESS.md)和[使用与回退](docs/roadmap/v0.3/DEV_USAGE.md)列明验证界限；真实模型盲评等门槛仍按[原实施任务书](docs/roadmap/v0.3/IMPLEMENTATION_TASKBOOK.md)执行。
+> **0.3.0-dev.4 开发版**：新增[一键记忆导入导出与百度网盘同步](docs/CLOUD_MEMORY_SYNC.md)。`/fish files` 打开管理页；连接网盘后，导出自动上传，启动自动检查并合并云端记忆。全量 259 项测试，以及真实百度网盘和 DSH Desktop 重启联动验收均通过，见[验证记录](docs/CLOUD_MEMORY_VALIDATION.md)。[实施进度](docs/roadmap/v0.3/IMPLEMENTATION_PROGRESS.md)和[使用与回退](docs/roadmap/v0.3/DEV_USAGE.md)列明验证界限；真实模型盲评等门槛仍按[原实施任务书](docs/roadmap/v0.3/IMPLEMENTATION_TASKBOOK.md)执行。
 
 > **0.2.0 新增**：普通 DSH 会话默认产生记忆与情感，无需 QQ；可通过文件拷贝或网盘在启动时合并记忆，并识别新旧电脑。普通会话输入 `/fish sync` 获取迁移文件路径。详见 [跨电脑同步说明](docs/SYNC.md)。
 
