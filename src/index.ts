@@ -560,10 +560,11 @@ const fromFile = chatForSession(config.channel.chatSessionsFile, sessionId)
 return fromFile  }
 // ── 诊断路由（仅回环） ──────────────────────────────────────────────────────
 let webDisposer: (() => void) | undefined
-const webServer = hostService(ctx, 'webServer') as PluginContext['webServer']
+const registerWeb = (context: PluginContext): (() => void) | undefined => {
+const webServer = hostService(context, 'webServer') as PluginContext['webServer']
 if (webServer && typeof
 webServer.register === 'function') {
-    webDisposer = webServer.register({
+    return webServer.register({
 kind: 'prefix',
 path: '/companion-memory',
 handler: (req, res) => {
@@ -590,6 +591,15 @@ response.writeHead?.(loopback ? 200 : 403, {
  'content-type': 'application/json; charset=utf-8' })
 response.end?.(body)      }
 ,    })  }
+return undefined
+}
+if (ctx.inject) {
+  const fiber = ctx.inject(['webServer'], child => {
+    const dispose = registerWeb(child)
+    if (dispose) child.effect?.(() => dispose)
+  })
+  webDisposer = () => { void fiber.dispose() }
+} else webDisposer = registerWeb(ctx)
 // ── 定时器 ──────────────────────────────────────────────────────────────────
 let outboxTimer: ReturnType<typeof setInterval> | null = null
 let backupTimer: ReturnType<typeof setInterval> | null = null
