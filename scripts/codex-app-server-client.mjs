@@ -50,7 +50,7 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   async initialize() {
-    await this.rpc('initialize', { clientInfo: { name: 'dsh_codex_mailbox', title: 'DSH Codex local collaboration', version: '0.2.0' } })
+    await this.rpc('initialize', { clientInfo: { name: 'dsh_codex_mailbox', title: 'DSH Codex local collaboration', version: '0.2.1' } })
     this.write({ method: 'initialized', params: {} })
   }
 
@@ -61,34 +61,45 @@ export class CodexAppServerClient extends EventEmitter {
     return result.thread.id
   }
 
-  async run(threadId, text, { timeoutMs = 600000, signal, onStarted = () => {} } = {}) {
-    let turnId, timer, stopTimer, completed, finish, fail, timedOut = false
+  async run(threadId, text, { timeoutMs = 600000, hardTimeoutMs = 1800000, signal, onStarted = () => {}, onProgress = () => {} } = {}) {
+    let turnId, timer, hardTimer, stopTimer, completed, finish, fail, timedOut = false, lastProgress = ''
     const early = []
     const messages = new Map()
     const result = new Promise((resolve, reject) => { finish = resolve; fail = reject })
+    const failure = (code, terminal = false, status) => Object.assign(Error(code), { terminal, status, threadId, turnId, lastProgress })
+    const armIdleTimeout = () => {
+      if (completed || timedOut) return
+      clearTimeout(timer)
+      timer = setTimeout(() => { timedOut = true; interrupt() }, timeoutMs)
+    }
     // Attach the listener before admission: fast completion can precede the RPC response.
     const consume = message => {
       const p = message.params ?? {}
       if (p.threadId !== threadId) return
       if (!turnId) { early.push(message); return }
       if (p.turnId && p.turnId !== turnId || p.turn?.id && p.turn.id !== turnId) return
+      if (message.method.startsWith('item/')) {
+        armIdleTimeout()
+        if (message.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.phase === 'commentary') lastProgress = String(p.item.text ?? '').slice(-1200)
+        onProgress({ turnId, type: message.method })
+      }
       if (message.method === 'item/completed' && p.item?.type === 'agentMessage' && (!p.item.phase || p.item.phase === 'final_answer')) messages.set(p.item.id, p.item.text ?? '')
       if (message.method === 'turn/completed') {
         completed = true
         const status = p.turn?.status
         const reply = [...messages.values()].filter(x => x.trim()).at(-1)
-        if (timedOut) fail(Error('CODEX_TURN_TIMEOUT'))
-        else if (status !== 'completed') fail(Error(`CODEX_TURN_${String(status ?? 'UNKNOWN').toUpperCase()}`))
-        else if (!reply) fail(Error('CODEX_EMPTY_RESPONSE'))
+        if (timedOut) fail(failure('CODEX_TURN_TIMEOUT', true, status))
+        else if (status !== 'completed') fail(failure(`CODEX_TURN_${String(status ?? 'UNKNOWN').toUpperCase()}`, true, status))
+        else if (!reply) fail(failure('CODEX_EMPTY_RESPONSE', true, status))
         else finish({ turnId, text: reply })
       }
     }
-    const exited = () => fail(Error('CODEX_PROCESS_EXITED'))
+    const exited = () => fail(failure('CODEX_PROCESS_EXITED'))
     const interrupt = () => {
       if (completed) return
       if (turnId) void this.rpc('turn/interrupt', { threadId, turnId }).catch(() => {})
       clearTimeout(stopTimer)
-      stopTimer = setTimeout(() => fail(Error(timedOut ? 'CODEX_TURN_TIMEOUT' : 'CODEX_TURN_INTERRUPTED')), 5000)
+      stopTimer = setTimeout(() => fail(failure(timedOut ? 'CODEX_TURN_TIMEOUT' : 'CODEX_TURN_INTERRUPTED')), 5000)
     }
     this.on('notification', consume)
     this.on('stopped', exited)
@@ -97,16 +108,18 @@ export class CodexAppServerClient extends EventEmitter {
     result.catch(() => {})
     try {
       if (signal?.aborted) throw Error('CODEX_TURN_INTERRUPTED')
-      const admitted = await this.rpc('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }] }, Math.min(timeoutMs, 60000))
+      // Admission has its own transport deadline; inactivity starts after a known turn id.
+      const admitted = await this.rpc('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }] }, 60000)
       turnId = admitted?.turn?.id
       if (!turnId) throw Error('CODEX_TURN_MISSING')
       onStarted(turnId)
+      hardTimer = setTimeout(() => { timedOut = true; interrupt() }, hardTimeoutMs)
       for (const message of early) consume(message)
       if (signal?.aborted) interrupt()
-      timer = setTimeout(() => { timedOut = true; interrupt() }, timeoutMs)
+      armIdleTimeout()
       return await result
     } finally {
-      clearTimeout(timer); clearTimeout(stopTimer)
+      clearTimeout(timer); clearTimeout(hardTimer); clearTimeout(stopTimer)
       signal?.removeEventListener('abort', interrupt)
       this.off('notification', consume)
       this.off('stopped', exited)

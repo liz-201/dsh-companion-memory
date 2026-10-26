@@ -106,9 +106,10 @@ export class DshBridgeClient {
   list() { return this.rpc('session/list', {}) }
   create(cwd) { return this.rpc('session/create', { cwd }) }
   cancel(sessionId) { return this.rpc('session/cancel', { sessionId }) }
-  async send(sessionId, text, requestId = randomUUID()) {
+  async send(sessionId, text, requestId = randomUUID(), { mode = 'queue' } = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new Error('Task text must not be empty')
-    await this.rpc('session/prompt', { sessionId, requestId, mode: 'queue', content: [{ type: 'text', text }], clientTimeZone: 'Asia/Shanghai' })
+    if (!['queue', 'steer'].includes(mode)) throw new Error('Unsupported DSH delivery mode')
+    await this.rpc('session/prompt', { sessionId, requestId, mode, content: [{ type: 'text', text }], clientTimeZone: 'Asia/Shanghai' })
     return { sessionId, requestId, accepted: true }
   }
 

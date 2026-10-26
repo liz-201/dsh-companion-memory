@@ -129,7 +129,7 @@ test('authenticated HTTP flow preserves DSH named arguments, task identity, queu
         value = { sessionId: 'worker' }
         break
       case 'session/prompt': {
-        assert.equal(args.request.mode, 'queue')
+        assert.equal(args.request.mode, args.request.requestId === 'task-urgent' ? 'steer' : 'queue')
         assert.equal(args.request.clientTimeZone, 'Asia/Shanghai')
         const { requestId } = args.request
         if (!prompts.has(requestId)) prompts.set(requestId, args.request)
@@ -157,6 +157,8 @@ test('authenticated HTTP flow preserves DSH named arguments, task identity, queu
   await client.send('worker', 'Review the plugin; do not edit files.', 'task-2')
   await client.send('worker', 'Review the plugin; do not edit files.', 'task-2')
   assert.equal(prompts.size, 1, 'Retry must keep the original durable request identity')
+  await client.send('worker', 'A reply is ready at the next safe step.', 'task-urgent', { mode: 'steer' })
+  assert.equal(prompts.get('task-urgent').mode, 'steer')
   assert.equal((await client.wait('worker', 'task-2', { timeoutMs: 0 })).state, 'pending', 'An older idle turn cannot complete the queued task')
   events.push({ seq: 3, type: 'turn/start', data: { turn: 2 } }, { seq: 4, type: 'user/message', data: { source: { rpcId: 'task-2' } } })
   assert.equal((await client.wait('worker', 'task-2', { timeoutMs: 0 })).state, 'pending')
@@ -199,4 +201,9 @@ test('optional mailbox instructions let every DSH session discover the reverse p
 
 test('missing optional systemPrompt service never prevents bridge installation', () => {
   assert.doesNotThrow(() => mountMailboxInstructions({ get: () => undefined }))
+})
+
+test('unsupported delivery modes are rejected before touching the host', async () => {
+  const client = new DshBridgeClient('http://127.0.0.1:12345/?token=test', { fetchImpl() { assert.fail('must not send') } })
+  await assert.rejects(client.send('worker', 'message', 'invalid-mode', { mode: 'replace' }), /Unsupported DSH delivery mode/)
 })

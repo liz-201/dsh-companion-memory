@@ -151,7 +151,7 @@ export class CodexMailbox {
     const delivered = []
     for (const row of rows) {
       // Stable DSH request identity closes the crash window between admission and local acknowledgement.
-      await client.send(row.session_id, `[Codex 协作回复 / mailbox ${row.id}]\n${row.response}`, row.delivery_request_id)
+      await client.send(row.session_id, `[Codex 协作回复 / mailbox ${row.id}]\n${row.response}`, row.delivery_request_id, { mode: 'steer' })
       this.db.prepare('UPDATE messages SET delivered_at_ms=? WHERE id=? AND delivered_at_ms IS NULL').run(clock(now()), row.id)
       delivered.push({ id: row.id, state: 'response-queued' })
     }

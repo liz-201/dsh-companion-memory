@@ -84,6 +84,7 @@ test('ambiguous delivery failures retain the response and reuse the exact DSH re
   await box.deliver(client, { now: () => 5000 })
   assert.deepEqual(calls[0], calls[1])
   assert.equal(calls[1][0], 'session-dsh-worker')
+  assert.deepEqual(calls[1][3], { mode: 'steer' })
   assert.match(calls[1][1], /mailbox request-one/)
   assert.equal(box.read('request-one', 6000).state, 'response-queued')
   assert.deepEqual(await box.deliver(client), [])

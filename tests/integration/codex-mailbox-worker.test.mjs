@@ -35,6 +35,20 @@ test('external stop interrupts an in-flight turn instead of supplying fake user 
   await assert.rejects(result, /TURN_INTERRUPTED/)
 })
 
+test('meaningful progress renews the inactivity timer for a task longer than the old limit', async t => {
+  const { client, thread } = await protocol(t, 'progress')
+  let progress = 0
+  const result = await client.run(thread, 'fixture', { timeoutMs: 80, hardTimeoutMs: 2000, onProgress() { progress++ } })
+  assert.equal(result.text, '鲸鱼确认：双向处理成功。')
+  assert.ok(progress >= 5)
+})
+
+test('continuous progress cannot bypass the absolute limit and interruption is confirmed', async t => {
+  const { client, thread } = await protocol(t, 'progress-forever')
+  await assert.rejects(client.run(thread, 'fixture', { timeoutMs: 80, hardTimeoutMs: 170 }), error =>
+    error.message === 'CODEX_TURN_TIMEOUT' && error.terminal === true && error.turnId === 'turn-fixture')
+})
+
 const fixture = t => {
   const dir = mkdtempSync(join(tmpdir(), 'mailbox-worker-'))
   const mailboxFile = join(dir, 'box.sqlite3'), stateFile = join(dir, 'worker.json')
@@ -58,9 +72,10 @@ test('bounded worker consumes an allowed request and returns the verified final 
   assert.equal(result.active, null)
   assert.equal(box.receiver().state, 'offline')
   assert.equal(box.read('one').state, 'response-queued')
-  assert.equal(deliveries.length, 1)
+  assert.equal(deliveries.length, 2)
   assert.equal(deliveries[0][0], 'session-allowed')
   assert.match(deliveries[0][1], /已完成隔离复核/)
+  assert.match(deliveries[1][1], /接收已结束/)
 })
 
 test('unlisted sessions receive a refusal without starting a model turn', async t => {
@@ -72,18 +87,51 @@ test('unlisted sessions receive a refusal without starting a model turn', async 
   assert.match(box.read('other').response, /白名单/)
 })
 
-test('model failures retain pending work and persist an uncertain-turn marker without raw errors', async t => {
+test('unconfirmed model failures quarantine execution while delivering explicit failure receipts', async t => {
   const { box, options, stateFile } = fixture(t)
   box.enqueue({ id: 'one', sessionId: 'session-allowed', text: 'review' })
-  await assert.rejects(runMailboxWorker({ ...options, clientFactory: () => fakeClient({ error: Error('CODEX_TURN_FAILED') }), dshFactory: async () => ({ send: async () => {} }) }), /TURN_FAILED/)
+  box.enqueue({ id: 'two', sessionId: 'session-allowed', text: 'second review' })
+  let starts = 0
+  await runMailboxWorker({ ...options, maxTasks: 2, clientFactory: () => { starts++; return fakeClient({ error: Error('CODEX_PROCESS_EXITED') }) }, dshFactory: async () => ({ send: async () => {} }) })
   const state = JSON.parse(readFileSync(stateFile, 'utf8'))
-  assert.equal(state.state, 'failed')
-  assert.equal(state.active.messageId, 'one')
+  assert.equal(state.quarantine.messageId, 'one')
+  assert.equal(state.lastFailure.code, 'CODEX_PROCESS_EXITED')
+  assert.equal(state.failures, 1)
+  assert.equal(starts, 1)
+  assert.equal(box.read('one').state, 'response-queued')
+  assert.match(box.read('one').response, /终止状态尚未确认/)
+  assert.match(box.read('two').response, /暂不启动新的代码任务/)
+  box.enqueue({ id: 'three', sessionId: 'session-allowed', text: 'third review' })
+  await runMailboxWorker({ ...options, clientFactory() { assert.fail('quarantine must persist across restart') }, dshFactory: async () => ({ send: async () => {} }) })
+  assert.match(box.read('three').response, /暂不启动新的代码任务/)
+})
+
+test('confirmed task failure returns a receipt and the next request still runs', async t => {
+  const { box, options } = fixture(t)
+  box.enqueue({ id: 'one', sessionId: 'session-allowed', text: 'long task' })
+  box.enqueue({ id: 'two', sessionId: 'session-allowed', text: 'next task' })
+  let starts = 0
+  const state = await runMailboxWorker({ ...options, maxTasks: 2, clientFactory: () => fakeClient({ error: starts++ === 0
+    ? Object.assign(Error('CODEX_TURN_TIMEOUT'), { terminal: true, lastProgress: '已经完成隔离测试，尚未总结。' }) : undefined }),
+    dshFactory: async () => ({ send: async () => {} }) })
+  assert.equal(state.processed, 2)
+  assert.equal(state.failures, 1)
+  assert.equal(state.quarantine, null)
+  assert.equal(starts, 2)
+  assert.match(box.read('one').response, /本轮未完成/)
+  assert.match(box.read('one').response, /不是最终验收/)
+  assert.match(box.read('two').response, /已完成隔离复核/)
+})
+
+test('an unreconciled crash journal is never silently replayed on restart', async t => {
+  const { box, options, stateFile } = fixture(t)
+  box.enqueue({ id: 'one', sessionId: 'session-allowed', text: 'review' })
+  writeFileSync(stateFile, JSON.stringify({ active: { messageId: 'one', turnId: 'unknown' } }))
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(runMailboxWorker({ ...options, clientFactory() { assert.fail('must reconcile first') } }), /PREVIOUS_TURN_NEEDS_RECONCILIATION/)
+    assert.equal(JSON.parse(readFileSync(stateFile, 'utf8')).active.turnId, 'unknown')
+  }
   assert.equal(box.read('one').state, 'pending')
-  assert.equal(box.read('one').response, null)
-  let started = false
-  await assert.rejects(runMailboxWorker({ ...options, clientFactory: () => { started = true; return fakeClient() } }), /PREVIOUS_TURN_NEEDS_RECONCILIATION/)
-  assert.equal(started, false, 'Uncertain admission must not silently launch another model turn')
 })
 
 test('DSH outages leave a completed model reply durable for a later delivery retry', async t => {
@@ -111,7 +159,7 @@ test('a live receiver prevents a competing worker from replacing the active stat
   assert.deepEqual(JSON.parse(readFileSync(stateFile, 'utf8')), original)
 })
 
-test('generation-scoped stop interrupts active work, keeps it pending and releases the receiver', async t => {
+test('generation-scoped stop interrupts active work, reports the interruption and releases the receiver', async t => {
   const { box, options, stateFile } = fixture(t)
   box.enqueue({ id: 'one', sessionId: 'session-allowed', text: 'review' })
   const client = fakeClient()
@@ -123,8 +171,8 @@ test('generation-scoped stop interrupts active work, keeps it pending and releas
   }
   const state = await runMailboxWorker({ ...options, clientFactory: () => client, dshFactory: async () => ({ send: async () => {} }) })
   assert.equal(state.state, 'stopped')
-  assert.equal(state.processed, 0)
-  assert.equal(box.read('one').state, 'pending')
+  assert.equal(state.processed, 1)
+  assert.match(box.read('one').response, /本轮未完成/)
   assert.equal(box.receiver().state, 'offline')
 })
 

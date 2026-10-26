@@ -3,12 +3,14 @@ const mode = process.argv[2]
 const send = value => process.stdout.write(JSON.stringify(value) + '\n')
 const notify = (method, params) => send({ method, params })
 let stopped = false
+let progressTimer
 for await (const line of createInterface({ input: process.stdin })) {
   const message = JSON.parse(line)
   if (message.method === 'initialize') send({ id: message.id, result: { userAgent: 'fake' } })
   if (message.method === 'thread/start') send({ id: message.id, result: { thread: { id: 'thread-fixture' } } })
   if (message.method === 'turn/interrupt') {
     stopped = true
+    clearInterval(progressTimer)
     send({ id: message.id, result: {} })
     notify('turn/completed', { threadId: 'thread-fixture', turn: { id: 'turn-fixture', status: 'interrupted' } })
   }
@@ -25,5 +27,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   if (mode === 'early') completion()
   send({ id: message.id, result: { turn: { id: 'turn-fixture', status: 'inProgress' } } })
-  if (mode !== 'early' && mode !== 'hang') setTimeout(completion, 10)
+  if (mode === 'progress' || mode === 'progress-forever') {
+    progressTimer = setInterval(() => notify('item/commandExecution/outputDelta', { threadId: 'thread-fixture', turnId: 'turn-fixture', delta: 'still working' }), 25)
+    if (mode === 'progress') setTimeout(() => { clearInterval(progressTimer); completion() }, 170)
+  } else if (mode !== 'early' && mode !== 'hang') setTimeout(completion, 10)
 }
