@@ -205,7 +205,7 @@ export class FactUpdater {
       if (row.id === candidate.id) return false
       if (row.status !== 'active') return false
       // 同主体同谓语不同值才算冲突；同值视为重复陈述，交给证据去重处理。
-      if (row.object_json === safeObjectText(candidate.object)) return false
+      if (row.object_json === (candidate.object === undefined || candidate.object === null ? null : JSON.stringify(candidate.object))) return false
       // 不同 visibility 的记忆互不覆盖：群聊里的说法不能顶掉私聊里的本人事实。
       if (row.visibility !== candidate.visibility && candidate.visibility === 'shared') return true
       return true

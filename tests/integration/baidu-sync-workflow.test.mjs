@@ -129,7 +129,8 @@ test('authorization through the UI, export upload/readback, and second-device st
   assert.equal(second.status().error, null)
   assert.equal(b.repos.getRawMessage('workflow').content, '完整链路的记忆')
   assert.equal(ownerB.ownerId, a.repos.getSetting('owner.id'))
-  assert.equal(api.files.size, 2)
+  // 两台设备各一份快照，外加目录里一份库清单对象（清单供同一 appFolder 下的其它库识别归属）。
+  assert.equal(api.files.size, 3)
   assert.ok(api.requests.some(request => request.path === '/rest/2.0/xpan/multimedia'))
   assert.ok(api.requests.some(request => request.method === 'upload'))
 })

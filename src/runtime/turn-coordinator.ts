@@ -40,6 +40,7 @@ import type { BackgroundQueue } from './background-queue.js'
 import { EVENT_KINDS, MEMORY_HINTS } from './output-protocol.js'
 import { hashKey } from '../memory/consolidator.js'
 import { matchSourceQuote } from '../memory/quote-match.js'
+import { reuseOwnerMemoryId } from '../memory/identity-memory.js'
 import { scheduleConsolidation } from './consolidation-scheduler.js'
 import { renderInteractionHabits } from '../memory/interaction-habits.js'
 import { ExpressionRuntime } from '../expression/runtime.js'
@@ -577,7 +578,7 @@ export class TurnCoordinator {
         continue
       }
       const outcome = deps.updater.write({
-        id: `mem_${hashKey(`${binding.principalId}:${hint.k}:${hint.t}`)}`,
+        id: reuseOwnerMemoryId(deps.repos, binding.principalId, principal => `mem_${hashKey(`${principal}:${hint.k}:${hint.t}`)}`),
         principalId: binding.principalId,
         conversationId: binding.conversationId,
         visibility: binding.visibility,

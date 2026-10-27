@@ -4,6 +4,7 @@ import { registerDevice } from './runtime/device-context.js'
 import { StartupSync } from './storage/startup-sync.js'
 import { MemoryTransfer } from './cloud/memory-transfer.js'
 import { createTransferHandler } from './cloud/transfer-ui.js'
+import { OwnerMergeInputError } from './storage/owner-merge.js'
 import { installLocalIntegration } from './adapters/local-integration.js'
 import { hostService } from './adapters/host-service.js'
 import { ComputerEvents } from './runtime/computer-events.js'
@@ -132,7 +133,7 @@ export interface CompanionService {
   consumed(turnId: string): boolean
   shutdown(): Promise<void>
 }
-const VERSION = '0.3.0-dev.6'
+const VERSION = '0.3.0-dev.7'
 function logger(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
 const prefix = '[companion]'
 if (level === 'error')
@@ -173,7 +174,10 @@ for (const row of db.all<{ key: string }>("SELECT key FROM plugin_settings WHERE
 }
 const device = registerDevice(repos)
 const owner = new OwnerIdentity(repos, config, Date.now(), device.id)
-const transfer = new MemoryTransfer(db, config, device.id)
+const transfer = new MemoryTransfer(db, config, device.id, { assertMergeIdle: () => {
+  const conversations = queue.stats()
+  if (conversations.running || conversations.pending || background.stats().activeLeases || desktop.list().some(item => desktop.isBusy(item.conversationId))) throw new OwnerMergeInputError('请先等待所有对话和后台整理完成，再重新预览并合并记忆。')
+} })
 let panel: PluginPanel | undefined
 const transferHandler = createTransferHandler(transfer, {
   snapshot: input => panel?.snapshot(input) ?? { ready: false },

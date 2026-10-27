@@ -60,6 +60,7 @@ export class ShareSources {
         const raw = Buffer.concat(chunks).toString('utf8')
         for (const binding of bindings) {
           if (binding.visibility !== 'private') continue
+          if (this.repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', binding.conversationId)?.principal_id !== binding.principalId) continue
           const interests = this.repos.activeMemories(binding.principalId, ['preference'], 20).filter(row => row.visibility === binding.visibility && (binding.visibility !== 'group' || row.conversation_id === binding.conversationId))
           for (const article of shareArticles(raw, url)) {
             const material = `${article.title} ${article.excerpt}`

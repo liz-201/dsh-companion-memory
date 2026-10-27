@@ -15,10 +15,13 @@ export function sharedOwnerPrincipal(config: Config, ownerId: string): string {
 }
 
 /** A data migration, not a new schema: retain source IDs and evidence, with one live owner projection. */
-export function unifyOwnerState(repos: Repositories, config: Config, ownerId: string, nowMs: number, options: { backup?: boolean } = {}): number {
+export function unifyOwnerState(repos: Repositories, config: Config, ownerId: string, nowMs: number, options: { backup?: boolean; sourceOwnerIds?: readonly string[] } = {}): number {
   const db = repos.db, target = sharedOwnerPrincipal(config, ownerId)
-  const legacy = db.all<{ id: string }>("SELECT id FROM principals WHERE companion_id = ? AND bot_account_id = 'owner'", config.companion.id)
-    .filter(row => row.id.startsWith(target + ':persona:'))
+  // Additional owner ids are supplied only by the explicit, previewed same-user pairing operation.
+  const sources = new Set(options.sourceOwnerIds ?? [])
+  sources.delete(ownerId)
+  const legacy = db.all<{ id: string; user_id: string }>("SELECT id, user_id FROM principals WHERE companion_id = ? AND bot_account_id = 'owner'", config.companion.id)
+    .filter(row => row.id !== target && (row.id.startsWith(target + ':persona:') || sources.has(row.user_id)))
   if (!legacy.length) return 0
   if (!db.get('SELECT id FROM principals WHERE id = ?', target)) throw Error('Shared owner identity is missing')
   const backup = options.backup !== false && db.file !== ':memory:'

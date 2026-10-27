@@ -16,6 +16,7 @@ import type { RawMessage } from '../domain/types.js'
 import { dedupeEvidence, FactUpdater, keyOf, type FactCandidate } from './fact-updater.js'
 import { estimateTokens } from '../runtime/context-budget.js'
 import { matchSourceQuote } from './quote-match.js'
+import { reuseOwnerMemoryId } from './identity-memory.js'
 
 export interface BatchMessage {
   id: string
@@ -191,7 +192,7 @@ export class Consolidator {
         return
       }
       const candidate: FactCandidate = {
-        id: memoryIdFor(batch.principalId, change),
+        id: reuseOwnerMemoryId(this.repos, batch.principalId, principal => memoryIdFor(principal, change)),
         principalId: batch.principalId,
         conversationId: batch.conversationId,
         visibility: this.repos.db.get<{ kind: string }>('SELECT kind FROM conversations WHERE id = ?', batch.conversationId)?.kind === 'group' ? 'group' : 'private',

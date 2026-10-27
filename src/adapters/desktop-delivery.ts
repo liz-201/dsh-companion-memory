@@ -19,9 +19,15 @@ export class DesktopDelivery {
   remove(sessionId: string): void { for (const [id, target] of this.targets) if (target.session.id === sessionId) this.targets.delete(id) }
   setBusy(sessionId: string, value: boolean): void { if (value) this.busy.add(sessionId); else this.busy.delete(sessionId) }
   isBusy(conversationId: string): boolean { const target = this.targets.get(conversationId); return target ? this.busy.has(target.session.id) : false }
-  list(): { conversationId: string; principalId: string }[] { return [...this.targets].map(([conversationId, target]) => ({ conversationId, principalId: target.binding.principalId })) }
+  list(): { conversationId: string; principalId: string }[] { return [...this.targets.keys()].flatMap(conversationId => { const binding = this.binding(conversationId); return binding ? [{ conversationId, principalId: binding.principalId }] : [] }) }
   has(conversationId: string): boolean { return this.targets.has(conversationId) }
-  binding(conversationId: string): IdentityBinding | null { return this.targets.get(conversationId)?.binding ?? null }
+  binding(conversationId: string): IdentityBinding | null {
+    const target = this.targets.get(conversationId)
+    if (!target) return null
+    const identity = this.repos.db.get<{ principal_id: string; user_id: string }>('SELECT c.principal_id, p.user_id FROM conversations c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?', conversationId)
+    // A live Desktop session survives a same-user pairing; its cached binding must follow the migrated conversation.
+    return identity ? { ...target.binding, principalId: identity.principal_id, userId: identity.user_id } : null
+  }
   personaText(conversationId: string): string | null {
     const messages = this.targets.get(conversationId)?.session.deriveMessages?.() as { role?: string; content?: { type?: string; text?: string }[] }[] | undefined
     const text = messages?.filter(message => message.role === 'system').flatMap(message => message.content ?? []).filter(block => block.type === 'text').map(block => block.text ?? '').join('\n')

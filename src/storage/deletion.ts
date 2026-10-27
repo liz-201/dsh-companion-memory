@@ -162,48 +162,60 @@ export function deleteScope(
 }
 
 /** 恢复备份后调用：把 tombstone 里记录过的行再次清掉。 */
-export function replayTombstones(db: Database, repos: Repositories, nowMs: number, config?: Config): { replayed: number; removedMemories: number } {
+export function replayTombstones(db: Database, repos: Repositories, nowMs: number, config: Config): { replayed: number; removedMemories: number } {
   let replayed = 0
   let removedMemories = 0
   const rebuild = new Set<string>()
   for (const row of repos.listTombstones()) {
     const selectorJson = String(row['selector_json'] ?? '{}')
-    let selector: DeleteSelector | undefined
-    try {
-      selector = JSON.parse(selectorJson) as DeleteSelector
-    } catch {
-      selector = undefined
-    }
-    if (selector === undefined) continue
-    const affected = String(row['affected_ids_json'] ?? '[]')
-    let ids: string[] = []
-    try {
-      ids = JSON.parse(affected) as string[]
-    } catch {
-      ids = []
-    }
+    const selector = JSON.parse(selectorJson) as DeleteSelector & { recordedOnly?: boolean }
+    if (!['memory', 'message', 'episode', 'task', 'all'].includes(selector.kind)) throw new Error('Invalid deletion selector')
+    const affected: unknown = JSON.parse(String(row['affected_ids_json'] ?? '[]'))
+    if (!Array.isArray(affected) || affected.some(id => typeof id !== 'string')) throw new Error('Invalid deletion ids')
+    const ids = new Set<string>(affected)
     db.transaction(() => {
       const principalId = String(row['principal_id'])
-      for (const memory of db.all<{ id: string; claim: string; object_json: string | null }>('SELECT id, claim, object_json FROM memories WHERE principal_id = ?', principalId)) if (suppressedBy(selectorJson, { id: memory.id, claim: memory.claim, object: memory.object_json === null ? null : JSON.parse(memory.object_json), sourceIds: repos.memoryEvidence(memory.id).map(item => item.messageId) })) ids.push(memory.id)
-      revokeDerivedSources(repos, ids)
-      for (const id of ids) {
+      if (selector.kind === 'message') ids.add(selector.messageId)
+      if (selector.kind === 'memory') ids.add(selector.memoryId)
+      if (selector.kind === 'episode') {
+        for (const id of memoriesForEpisode(db, selector.episodeId)) ids.add(id)
+        db.run("UPDATE relationship_episodes SET status = 'archived' WHERE id = ? AND principal_id = ?", selector.episodeId, principalId)
+      }
+      if (selector.kind === 'task') db.run("UPDATE tasks SET status = 'cancelled' WHERE id = ? AND principal_id = ? AND status IN ('proposed','confirmed')", selector.taskId, principalId)
+      if (selector.kind === 'all' && !selector.recordedOnly) {
+        for (const row of db.all<{ id: string }>('SELECT id FROM raw_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE principal_id = ?)', principalId)) ids.add(row.id)
+        clearCheckpoints(db, principalId)
+        db.run("UPDATE tasks SET status = 'cancelled' WHERE principal_id = ? AND status IN ('proposed','confirmed')", principalId)
+      }
+      for (const id of [...ids]) {
+        if (db.get('SELECT r.id FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE r.id = ? AND c.principal_id = ?', id, principalId)) {
+          for (const memoryId of memoriesForMessage(db, id)) ids.add(memoryId)
+        }
+      }
+      for (const memory of db.all<{ id: string; claim: string; object_json: string | null }>('SELECT id, claim, object_json FROM memories WHERE principal_id = ?', principalId)) if (selector.kind === 'all' && !selector.recordedOnly || suppressedBy(selectorJson, { id: memory.id, claim: memory.claim, object: memory.object_json === null ? null : JSON.parse(memory.object_json), sourceIds: repos.memoryEvidence(memory.id).map(item => item.messageId) })) ids.add(memory.id)
+      const scopedIds = [...ids].filter(id => repos.getMemory(id)?.principal_id === principalId || db.get('SELECT r.id FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE r.id = ? AND c.principal_id = ?', id, principalId))
+      revokeDerivedSources(repos, scopedIds)
+      for (const id of scopedIds) {
         if (repos.getMemory(id)?.principal_id === principalId) {
           repos.removeFromIndex(id)
           db.run('DELETE FROM memory_evidence WHERE memory_id = ?', id)
           db.run('DELETE FROM memory_edges WHERE from_id = ? OR to_id = ?', id, id)
           const result = db.run('DELETE FROM memories WHERE id = ?', id)
           removedMemories += result.changes
-        } else {
-          db.run("UPDATE raw_messages SET content = '', deleted_at_ms = ? WHERE id = ? AND deleted_at_ms IS NULL AND conversation_id IN (SELECT id FROM conversations WHERE principal_id = ?)", nowMs, id, principalId)
-          if (db.run("UPDATE affect_events SET status = 'retracted' WHERE principal_id = ? AND status = 'active' AND json_extract(payload_json, '$.appraisal.sourceMessageId') = ?", principalId, id).changes > 0) rebuild.add(principalId)
         }
+        if (!db.get('SELECT r.id FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE r.id = ? AND c.principal_id = ?', id, principalId)) continue
+        db.run('DELETE FROM memory_evidence WHERE message_id = ?', id)
+        db.run("UPDATE raw_messages SET content = '', deleted_at_ms = COALESCE(deleted_at_ms, ?) WHERE id = ?", nowMs, id)
+        db.run("UPDATE affect_events SET status = 'retracted' WHERE principal_id = ? AND status = 'active' AND (appraisal_id IN (SELECT id FROM appraisals WHERE source_message_id = ?) OR json_extract(payload_json, '$.appraisal.sourceMessageId') = ?)", principalId, id, id)
+        db.run("UPDATE appraisals SET status = 'retracted' WHERE source_message_id = ?", id)
+        rebuild.add(principalId)
       }
     })
     replayed += 1
   }
   for (const principalId of rebuild) {
-    if (config) { const stored = repos.getSnapshot(principalId); repos.putSnapshot(rebuildAffect(repos, config, principalId, nowMs), stored?.revision ?? 0) }
-    else repos.setSetting(`local.affect-rebuild:${principalId}`, '1', nowMs)
+    const stored = repos.getSnapshot(principalId)
+    repos.putSnapshot(rebuildAffect(repos, config, principalId, nowMs), stored?.revision ?? 0)
   }
   return { replayed, removedMemories }
 }

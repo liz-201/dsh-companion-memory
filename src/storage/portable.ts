@@ -8,6 +8,7 @@ import type { Database, Row } from './database.js'
 import { Repositories } from './repositories.js'
 import { backupNow, backupDirectory } from './backup.js'
 import { rebuildAffect } from '../domain/affect-projector.js'
+import { initialSnapshot } from '../domain/affect-reducer.js'
 import { buildLexicalTerms } from '../memory/lexical-index.js'
 import { revokeDerivedSources } from '../memory/habit-learning.js'
 import { validatePersonality, TRAITS } from '../domain/personality-profile.js'
@@ -209,7 +210,7 @@ function writeRow(db: Database, table: string, row: Row, existing?: Row): void {
   }
 }
 
-export function importPortable(db: Database, config: Config, payload: PortablePayload, checksum: string, options: { nowMs?: number; resumeReminders?: boolean } = {}): ImportReport {
+export function importPortable(db: Database, config: Config, payload: PortablePayload, checksum: string, options: { nowMs?: number; resumeReminders?: boolean; backup?: boolean; recordedTombstones?: boolean } = {}): ImportReport {
   if (payload.format !== 'dsh-companion-transfer' || ![1, 2].includes(payload.version)) throw new Error('Unsupported transfer package version')
   const nowMs = options.nowMs ?? Date.now()
   const repos = new Repositories(db)
@@ -259,7 +260,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
   // A first import into an empty database has nothing to protect, so it is not a degradation.
   const lineageMissing = populated && Object.keys(base).length === 0
   report.lineageMissing = lineageMissing
-  if (db.file !== ':memory:') {
+  if (options.backup !== false && db.file !== ':memory:') {
     // Repeating the same failed import against unchanged data must not create
     // another full backup on every launch. A changed local state still gets a
     // fresh pre-import backup, preserving exact rollback semantics.
@@ -294,9 +295,23 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
         if (table === 'plugin_settings' && !transferableSetting(String(raw['key']))) continue
         const row = { ...raw }
         const existing = current.get(key)
+        if (table === 'deletion_tombstones') {
+          const selector = JSON.parse(String(row['selector_json'])) as { kind?: string; recordedOnly?: boolean }
+          const previousSelector = existing ? JSON.parse(String(existing['selector_json'])) as { recordedOnly?: boolean } : undefined
+          if (selector.kind === 'all' && (options.recordedTombstones || previousSelector?.recordedOnly)) row['selector_json'] = JSON.stringify({ ...selector, recordedOnly: true })
+        }
+        if (table === 'conversations' && !existing && db.get('SELECT id FROM conversations WHERE principal_id = ? AND kind = ? AND platform_conversation_id = ? AND id <> ?', row['principal_id'], row['kind'], row['platform_conversation_id'], row['id'])) {
+          // Keep both histories and their source ids; only the live channel binding is reused later.
+          row['platform_conversation_id'] = `import-history:${String(row['id'])}:${String(row['platform_conversation_id'])}`
+        }
         const baseHash = base[table]?.[key]
         const localHash = existing ? hash(existing) : undefined
         const incomingHash = hash(raw)
+        if (table === 'deletion_tombstones' && existing && incomingHash === localHash && row['selector_json'] !== raw['selector_json']) {
+          writeRow(db, table, row, existing)
+          report.updated++
+          continue
+        }
         if (incomingHash === localHash) continue
         // A fresh device creates a placeholder before asynchronous cloud restore.
         // It is not an intentional ownership fork. Only the exact marked
@@ -346,6 +361,9 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
           if (table === 'raw_messages' && (existing['deleted_at_ms'] !== null || row['deleted_at_ms'] !== null)) {
             row['deleted_at_ms'] = existing['deleted_at_ms'] ?? row['deleted_at_ms']
             if (row['deleted_at_ms'] !== null) row['content'] = ''
+          } else if (table === 'affect_events' && (existing['status'] === 'retracted' || row['status'] === 'retracted')) {
+            // A withdrawn source must not start contributing again after a branch merge.
+            row['status'] = 'retracted'
           } else if (table === 'expression_habits' && (existing['status'] === 'revoked' || row['status'] === 'revoked')) row['status'] = 'revoked'
           else if (['outbox', 'background_jobs', 'audit_events'].includes(table)) continue
           else { conflicts(table, key, existing, raw, baseHash); continue }
@@ -384,18 +402,33 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
     for (const tombstone of db.all<{ affected_ids_json: string; selector_json: string; principal_id: string }>('SELECT affected_ids_json, selector_json, principal_id FROM deletion_tombstones')) {
       const suppressedIds = db.all<{ id: string; claim: string; object_json: string | null }>('SELECT id, claim, object_json FROM memories WHERE principal_id = ?', tombstone.principal_id).filter(memory => suppressedBy(tombstone.selector_json, { id: memory.id, claim: memory.claim, object: memory.object_json === null ? null : JSON.parse(memory.object_json), sourceIds: repos.memoryEvidence(memory.id).map(item => item.messageId) })).map(memory => memory.id)
       for (const id of new Set([...(JSON.parse(tombstone.affected_ids_json) as string[]), ...suppressedIds])) {
+      const memory = repos.getMemory(id)
+      const ownMemory = memory?.principal_id === tombstone.principal_id
+      const ownMessage = !!db.get('SELECT r.id FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE r.id = ? AND c.principal_id = ?', id, tombstone.principal_id)
+      if (!ownMemory && !ownMessage) continue
       revokeDerivedSources(repos, [id])
-      db.run('DELETE FROM memory_evidence WHERE memory_id = ? OR message_id = ?', id, id)
-      db.run('DELETE FROM memory_edges WHERE from_id = ? OR to_id = ?', id, id)
-      db.run('DELETE FROM memories WHERE id = ?', id)
-      db.run('UPDATE raw_messages SET content = ?, deleted_at_ms = COALESCE(deleted_at_ms, ?) WHERE id = ?', '', nowMs, id)
-      for (const row of db.all<{ principal_id: string }>("SELECT DISTINCT principal_id FROM affect_events WHERE status = 'active' AND json_extract(payload_json, '$.appraisal.sourceMessageId') = ?", id)) deletionRebuild.add(row.principal_id)
-      db.run("UPDATE affect_events SET status = 'retracted' WHERE status = 'active' AND json_extract(payload_json, '$.appraisal.sourceMessageId') = ?", id)
+      if (ownMemory) {
+        db.run('DELETE FROM memory_evidence WHERE memory_id = ?', id)
+        db.run('DELETE FROM memory_edges WHERE from_id = ? OR to_id = ?', id, id)
+        db.run('DELETE FROM memories WHERE id = ? AND principal_id = ?', id, tombstone.principal_id)
+      }
+      if (ownMessage) {
+        db.run('DELETE FROM memory_evidence WHERE message_id = ?', id)
+        db.run('UPDATE raw_messages SET content = ?, deleted_at_ms = COALESCE(deleted_at_ms, ?) WHERE id = ?', '', nowMs, id)
+        deletionRebuild.add(tombstone.principal_id)
+        db.run("UPDATE affect_events SET status = 'retracted' WHERE principal_id = ? AND status = 'active' AND json_extract(payload_json, '$.appraisal.sourceMessageId') = ?", tombstone.principal_id, id)
+      }
       }
     }
     // Keep the imported snapshot exactly for a fresh/fast-forward restore. Rebuild only divergent projections.
     for (const principal of new Set([...(populated ? rebuild : []), ...deletionRebuild].map(id => repos.getSetting(`identity.shared-alias:${id}`) ?? id))) {
       const stored = repos.getSnapshot(principal)
+      const baseline = repos.getSetting(`affect.baseline:${principal}`)
+      const firstEvent = db.get<{ at: number | null }>("SELECT MIN(event_time_ms) AS at FROM affect_events WHERE principal_id = ? AND status = 'active'", principal)?.at
+      if (baseline && firstEvent !== null && firstEvent !== undefined && Number((JSON.parse(baseline) as { asOfMs: number }).asOfMs) > firstEvent) {
+        repos.setSetting(`local.portable.baseline-archive:${hash([payload.id, principal])}`, baseline, nowMs)
+        repos.setSetting(`affect.baseline:${principal}`, JSON.stringify(initialSnapshot(principal, config.companion.preset, config.affect.ruleVersion, firstEvent)), nowMs)
+      }
       const snapshot = rebuildAffect(repos, config, principal, nowMs)
       repos.putSnapshot(snapshot, stored?.revision ?? 0)
     }

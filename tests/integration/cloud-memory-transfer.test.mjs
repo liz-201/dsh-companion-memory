@@ -74,7 +74,8 @@ test('opening a new instance downloads cloud memory before startup readiness and
   await b.transfer.ready
   assert.equal(b.transfer.isReady, true)
   assert.equal(b.repos.getRawMessage('from-a').content, 'from-a')
-  assert.equal(cloud.files.size, 2, 'each device owns a separate cloud snapshot')
+  // 每个设备一份包，外加目录里一份库清单对象（清单用于识别同一 appFolder 下的其它记忆库）。
+  assert.equal(cloud.files.size, 3, 'each device owns a separate cloud snapshot plus one library manifest')
   assert.equal(b.transfer.status().error, null)
 })
 
@@ -98,7 +99,7 @@ test('startup bounds cloud network waiting and continues with local memory befor
   cloud.list = list
   await a.transfer.sync()
   assert.equal(a.transfer.status().error, null)
-  assert.equal(cloud.uploads, 1)
+  assert.equal(cloud.uploads, 2)
 })
 
 test('different populated owners receive an actionable diagnosis without combining or publishing memories', async t => {
@@ -172,7 +173,7 @@ test('explicit export automatically uploads after connection; a failed upload pr
   assert.ok(!JSON.stringify(a.transfer.status()).includes('secret-test-token'))
   cloud.failUpload = false
   await a.transfer.sync()
-  assert.equal(cloud.files.size, 1)
+  assert.equal(cloud.files.size, 2)
   assert.equal(a.transfer.status().error, null)
 })
 
@@ -181,13 +182,13 @@ test('a failed cloud download never publishes a falsely up-to-date snapshot', as
   raw(a, 'cloud-only'); await a.transfer.sync()
   cloud.failDownload = true
   await b.transfer.sync()
-  assert.equal(cloud.files.size, 1)
+  assert.equal(cloud.files.size, 2)
   assert.ok(b.transfer.status().error)
   assert.equal(b.transfer.status().lastSyncAtMs, null)
   cloud.failDownload = false
   await b.transfer.sync()
   assert.ok(b.repos.getRawMessage('cloud-only'))
-  assert.equal(cloud.files.size, 2)
+  assert.equal(cloud.files.size, 3)
 })
 
 test('concurrent sync requests share one operation and disconnect retains local and remote memory', async t => {
@@ -196,14 +197,14 @@ test('concurrent sync requests share one operation and disconnect retains local 
   const first = a.transfer.sync(), second = a.transfer.sync()
   assert.equal(first, second)
   await Promise.all([first, second])
-  assert.equal(cloud.uploads, 1)
+  assert.equal(cloud.uploads, 2)
   await a.transfer.disconnect()
   assert.equal(a.transfer.status().enabled, false)
   assert.equal(a.transfer.status().connected, false)
   assert.ok(a.repos.getRawMessage('local'))
-  assert.equal(cloud.files.size, 1)
+  assert.equal(cloud.files.size, 2)
   await a.transfer.sync()
-  assert.equal(cloud.uploads, 1)
+  assert.equal(cloud.uploads, 2)
 })
 
 test('a repeated invalid import reuses its backup until local transferable state changes', t => {
@@ -264,7 +265,7 @@ test('memory created during upload triggers an immediate follow-up instead of wa
   await started
   raw(a, 'during-upload')
   release(); await first; await a.transfer.sync()
-  assert.equal(cloud.uploads, 2)
+  assert.equal(cloud.uploads, 4)
   const file = [...cloud.files.values()][0]
   b.transfer.importBytes(file.bytes)
   assert.ok(b.repos.getRawMessage('before-upload'))

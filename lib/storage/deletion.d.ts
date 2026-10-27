@@ -37,7 +37,7 @@ export interface DeleteResult {
 }
 export declare function deleteScope(db: Database, repos: Repositories, principalId: string, selector: DeleteSelector, nowMs: number, backupKeepDays: number, config?: Config): DeleteResult;
 /** 恢复备份后调用：把 tombstone 里记录过的行再次清掉。 */
-export declare function replayTombstones(db: Database, repos: Repositories, nowMs: number, config?: Config): {
+export declare function replayTombstones(db: Database, repos: Repositories, nowMs: number, config: Config): {
     replayed: number;
     removedMemories: number;
 };

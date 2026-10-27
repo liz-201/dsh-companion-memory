@@ -75,5 +75,7 @@ export declare function unpackPlugin(payload: PortablePayload, directory: string
 export declare function importPortable(db: Database, config: Config, payload: PortablePayload, checksum: string, options?: {
     nowMs?: number;
     resumeReminders?: boolean;
+    backup?: boolean;
+    recordedTombstones?: boolean;
 }): ImportReport;
 export {};
