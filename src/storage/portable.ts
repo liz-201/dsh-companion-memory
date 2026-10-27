@@ -32,8 +32,8 @@ type Inventory = Record<string, Record<string, string>>
 interface Checkpoint { id: string; inventory: Inventory }
 export interface PortablePayload {
   format: 'dsh-companion-transfer'
-  version: 1 | 2
-  formatVersion?: 2
+  version: 1 | 2 | 3
+  formatVersion?: 2 | 3
   minReaderVersion?: string
   id: string
   createdAtMs: number
@@ -140,8 +140,12 @@ export function exportPortable(db: Database, config: Config, file: string, optio
   if (!ownerId) throw new Error('Owner identity is missing; start the plugin once before exporting')
   const id = randomUUID()
   const nowMs = options.nowMs ?? Date.now()
+  // An older reader ignores owner aliases and recorded-only deletion scope.
+  // Use a new envelope version so it refuses the merged package before writing anything.
+  const version = repos.getSetting('memory.owner-merge-version') === '1'
+    || db.get("SELECT key FROM plugin_settings WHERE key LIKE 'identity.shared-alias:%' LIMIT 1") ? 3 : 2
   const payload = db.transaction((): PortablePayload => ({
-    format: 'dsh-companion-transfer', version: 2, formatVersion: 2, minReaderVersion: '0.3.0-dev.1', id, createdAtMs: nowMs, companionId: config.companion.id, ownerId,
+    format: 'dsh-companion-transfer', version, formatVersion: version, minReaderVersion: version === 3 ? '0.3.0-dev.8' : '0.3.0-dev.1', id, createdAtMs: nowMs, companionId: config.companion.id, ownerId,
     schema: db.all<{ version: number; checksum: string }>('SELECT version, checksum FROM schema_migrations ORDER BY version'),
     ancestors: db.all<{ id: string; inventory_json: string }>('SELECT id, inventory_json FROM portable_checkpoints ORDER BY created_at_ms DESC, rowid DESC LIMIT 8').reverse().map(row => ({ id: row.id, inventory: JSON.parse(row.inventory_json) as Inventory })),
     tables: snapshotForTransfer(db), plugin: {},
@@ -149,7 +153,7 @@ export function exportPortable(db: Database, config: Config, file: string, optio
   if (options.includePlugin !== false) payload.plugin = pluginFiles(options.pluginRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'))
   const bytes = Buffer.from(stableJson(payload))
   if (bytes.length > MAX_BYTES) throw new Error('Transfer package exceeds the 256 MiB uncompressed limit')
-  const envelope = { format: 'dsh-companion-transfer', version: 2, sha256: createHash('sha256').update(bytes).digest('hex'), data: gzipSync(bytes).toString('base64') }
+  const envelope = { format: 'dsh-companion-transfer', version, sha256: createHash('sha256').update(bytes).digest('hex'), data: gzipSync(bytes).toString('base64') }
   const target = resolve(file)
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, JSON.stringify(envelope), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
@@ -166,12 +170,12 @@ export function exportPortable(db: Database, config: Config, file: string, optio
 export function readPortable(file: string): { payload: PortablePayload; checksum: string } {
   if (statSync(file).size > MAX_BYTES * 2) throw new Error('Transfer file too large')
   const envelope = JSON.parse(readFileSync(file, 'utf8')) as { format?: string; version?: number; sha256?: string; data?: string }
-  if (envelope.format !== 'dsh-companion-transfer' || ![1, 2].includes(Number(envelope.version)) || typeof envelope.data !== 'string' || envelope.data.length > MAX_BYTES * 2) throw new Error('Unsupported transfer package')
+  if (envelope.format !== 'dsh-companion-transfer' || ![1, 2, 3].includes(Number(envelope.version)) || typeof envelope.data !== 'string' || envelope.data.length > MAX_BYTES * 2) throw new Error('Unsupported transfer package')
   const bytes = gunzipSync(Buffer.from(envelope.data, 'base64'), { maxOutputLength: MAX_BYTES })
   const checksum = createHash('sha256').update(bytes).digest('hex')
   if (checksum !== envelope.sha256) throw new Error('Transfer checksum mismatch; no data imported')
   const payload = JSON.parse(bytes.toString('utf8')) as PortablePayload
-  if (payload.format !== 'dsh-companion-transfer' || ![1, 2].includes(payload.version) || payload.version !== envelope.version || typeof payload.id !== 'string' || typeof payload.ownerId !== 'string' || !payload.tables || !Array.isArray(payload.ancestors)) throw new Error('Invalid transfer payload')
+  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3].includes(payload.version) || payload.version !== envelope.version || typeof payload.id !== 'string' || typeof payload.ownerId !== 'string' || !payload.tables || !Array.isArray(payload.ancestors)) throw new Error('Invalid transfer payload')
   for (const table of Object.keys(payload.tables)) if (!Object.hasOwn(TABLES, table) || !Array.isArray(payload.tables[table])) throw new Error(`Unsupported transfer table: ${table}`)
   for (const table of Object.keys(TABLES)) if (!Array.isArray(payload.tables[table])) {
     if (payload.version === 1 && V2_TABLES.has(table)) payload.tables[table] = []
@@ -211,7 +215,7 @@ function writeRow(db: Database, table: string, row: Row, existing?: Row): void {
 }
 
 export function importPortable(db: Database, config: Config, payload: PortablePayload, checksum: string, options: { nowMs?: number; resumeReminders?: boolean; backup?: boolean; recordedTombstones?: boolean } = {}): ImportReport {
-  if (payload.format !== 'dsh-companion-transfer' || ![1, 2].includes(payload.version)) throw new Error('Unsupported transfer package version')
+  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3].includes(payload.version)) throw new Error('Unsupported transfer package version')
   const nowMs = options.nowMs ?? Date.now()
   const repos = new Repositories(db)
   const report: ImportReport = { inserted: 0, updated: 0, deleted: 0, conflicts: 0, alreadyImported: false, backup: null, pausedTasks: 0, lineageMissing: false }
@@ -293,6 +297,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
       const incoming = new Map(incomingRows.map(row => [keyFor(table, row), row]))
       for (const [key, raw] of incoming) {
         if (table === 'plugin_settings' && !transferableSetting(String(raw['key']))) continue
+        if (table === 'plugin_settings' && raw['key'] === 'memory.owner-merge-version' && repos.getSetting('memory.owner-merge-version') === '1' && raw['value'] !== '1') continue
         const row = { ...raw }
         const existing = current.get(key)
         if (table === 'deletion_tombstones') {
@@ -388,9 +393,11 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
     for (const { table, row } of deletes.reverse()) {
       const keys = TABLES[table]!
       if (!keys.length || table === 'plugin_settings' && !transferableSetting(String(row['key']))) continue
+      if (table === 'plugin_settings' && row['key'] === 'memory.owner-merge-version') continue
       db.run(`DELETE FROM ${table} WHERE ${keys.map(key => `${key} = ?`).join(' AND ')}`, ...keys.map(key => row[key])); report.deleted++
     }
     repos.setSetting('owner.id', payload.ownerId, nowMs)
+    if (payload.version === 3) repos.setSetting('memory.owner-merge-version', '1', nowMs)
     const shared = sharedOwnerPrincipal(config, payload.ownerId)
     repos.ensurePrincipal(shared, config.companion.id, 'owner', payload.ownerId, nowMs)
     // An older device may still upload partitioned roles. Normalize inside this same import transaction.

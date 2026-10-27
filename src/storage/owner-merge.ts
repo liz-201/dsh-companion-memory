@@ -51,7 +51,7 @@ function counts(tables: Record<string, Row[]>, principalIds: Set<string>): Owner
 }
 
 function validatePackage(config: Config, payload: PortablePayload, checksum: string): void {
-  if (!payload || payload.format !== 'dsh-companion-transfer' || ![1, 2].includes(payload.version)
+  if (!payload || payload.format !== 'dsh-companion-transfer' || ![1, 2, 3].includes(payload.version)
     || typeof payload.id !== 'string' || !payload.id || typeof payload.ownerId !== 'string' || !payload.ownerId
     || !payload.tables || !Array.isArray(payload.schema) || typeof checksum !== 'string' || !checksum) {
     throw new OwnerMergeInputError('记忆文件信息无效，请重新选择文件并预览。')
@@ -115,6 +115,7 @@ function applyMerge(db: Database, config: Config, payload: PortablePayload, chec
   // The import freezes incoming all-deletions only when writing rows, so lineage
   // and receipts remain bound to the original, unmodified package inventory.
   const report = importPortable(db, config, payload, checksum, { backup: false, recordedTombstones: true, nowMs })
+  repos.setSetting('memory.owner-merge-version', '1', nowMs)
   if (db.all('PRAGMA foreign_key_check').length) throw new Error('归并将破坏数据引用，已全部回滚。')
   return report
 }
