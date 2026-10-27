@@ -4,11 +4,11 @@ import { EventEmitter } from 'node:events'
 
 /** Only official stdio JSON-RPC. Never reads or exports local login credentials. */
 export class CodexAppServerClient extends EventEmitter {
-  constructor(command = 'codex', args = ['app-server', '--listen', 'stdio://']) {
+  constructor(command = 'codex', args = ['app-server', '--listen', 'stdio://'], { env = process.env } = {}) {
     super()
     this.pending = new Map()
     this.nextId = 1
-    this.child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    this.child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env })
     this.child.stderr.on('data', () => {}) // Host logs may contain tool inputs or private account information.
     this.child.stdin.on('error', () => {})
     this.reader = createInterface({ input: this.child.stdout })
@@ -23,12 +23,13 @@ export class CodexAppServerClient extends EventEmitter {
         if (!pending) return
         this.pending.delete(message.id)
         clearTimeout(pending.timer)
+        pending.cleanup?.()
         if (message.error) pending.reject(Error(`CODEX_RPC_${Number(message.error.code) || 'FAILED'}`))
         else pending.resolve(message.result)
       } else if (message.method) this.emit('notification', message)
     })
     const stopped = () => {
-      for (const { reject, timer } of this.pending.values()) { clearTimeout(timer); reject(Error('CODEX_PROCESS_EXITED')) }
+      for (const { reject, timer, cleanup } of this.pending.values()) { clearTimeout(timer); cleanup?.(); reject(Error('CODEX_PROCESS_EXITED')) }
       this.pending.clear()
       this.emit('stopped')
     }
@@ -40,29 +41,35 @@ export class CodexAppServerClient extends EventEmitter {
     if (!this.child.stdin.destroyed) this.child.stdin.write(JSON.stringify(message) + '\n')
   }
 
-  rpc(method, params, timeoutMs = 15000) {
+  rpc(method, params, timeoutMs = 15000, { signal } = {}) {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(Error('CODEX_RPC_ABORTED')); return }
       const id = this.nextId++
-      const timer = setTimeout(() => { this.pending.delete(id); reject(Error('CODEX_RPC_TIMEOUT')) }, timeoutMs)
-      this.pending.set(id, { resolve, reject, timer })
+      const cleanup = () => signal?.removeEventListener('abort', abort)
+      const abort = () => { clearTimeout(timer); cleanup(); this.pending.delete(id); reject(Error('CODEX_RPC_ABORTED')) }
+      const timer = setTimeout(() => { cleanup(); this.pending.delete(id); reject(Error('CODEX_RPC_TIMEOUT')) }, timeoutMs)
+      this.pending.set(id, { resolve, reject, timer, cleanup })
+      signal?.addEventListener('abort', abort, { once: true })
       this.write({ id, method, params })
     })
   }
 
-  async initialize() {
-    await this.rpc('initialize', { clientInfo: { name: 'dsh_codex_mailbox', title: 'DSH Codex local collaboration', version: '0.2.1' } })
+  async initialize({ signal } = {}) {
+    await this.rpc('initialize', { clientInfo: { name: 'dsh_codex_mailbox', title: 'DSH Codex local collaboration', version: '0.3.0' } }, 15000, { signal })
     this.write({ method: 'initialized', params: {} })
   }
 
-  async startThread(cwd, developerInstructions) {
-    const result = await this.rpc('thread/start', { cwd, approvalPolicy: 'never', sandbox: 'workspace-write',
-      developerInstructions, config: { 'sandbox_workspace_write.network_access': true } }, 60000)
+  async startThread(cwd, developerInstructions, { readOnly = false, signal } = {}) {
+    const result = await this.rpc('thread/start', { cwd, approvalPolicy: 'never', sandbox: readOnly ? 'read-only' : 'workspace-write',
+      developerInstructions, config: { 'sandbox_workspace_write.network_access': true, 'sandbox_workspace_write.writable_roots': [] } }, 60000, { signal })
     if (!result?.thread?.id) throw Error('CODEX_THREAD_MISSING')
     return result.thread.id
   }
 
   async run(threadId, text, { timeoutMs = 600000, hardTimeoutMs = 1800000, signal, onStarted = () => {}, onProgress = () => {} } = {}) {
+    if (signal?.aborted) throw Object.assign(Error('CODEX_TURN_INTERRUPTED'), { terminal: true, threadId })
     let turnId, timer, hardTimer, stopTimer, completed, finish, fail, timedOut = false, lastProgress = ''
+    const admissionController = new AbortController()
     const early = []
     const messages = new Map()
     const result = new Promise((resolve, reject) => { finish = resolve; fail = reject })
@@ -97,6 +104,7 @@ export class CodexAppServerClient extends EventEmitter {
     const exited = () => fail(failure('CODEX_PROCESS_EXITED'))
     const interrupt = () => {
       if (completed) return
+      if (!turnId) admissionController.abort()
       if (turnId) void this.rpc('turn/interrupt', { threadId, turnId }).catch(() => {})
       clearTimeout(stopTimer)
       stopTimer = setTimeout(() => fail(failure(timedOut ? 'CODEX_TURN_TIMEOUT' : 'CODEX_TURN_INTERRUPTED')), 5000)
@@ -107,13 +115,16 @@ export class CodexAppServerClient extends EventEmitter {
     // The rejection handler is attached now, including when the child exits during admission.
     result.catch(() => {})
     try {
-      if (signal?.aborted) throw Error('CODEX_TURN_INTERRUPTED')
+      if (signal?.aborted) throw failure('CODEX_TURN_INTERRUPTED', true)
+      // The absolute budget includes admission; a lost acknowledgement must not hold shutdown for a minute.
+      hardTimer = setTimeout(() => { timedOut = true; interrupt() }, hardTimeoutMs)
       // Admission has its own transport deadline; inactivity starts after a known turn id.
-      const admitted = await this.rpc('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }] }, 60000)
+      let admitted
+      try { admitted = await this.rpc('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }] }, 60000, { signal: admissionController.signal }) }
+      catch (error) { throw failure(timedOut ? 'CODEX_TURN_TIMEOUT' : error.message) }
       turnId = admitted?.turn?.id
       if (!turnId) throw Error('CODEX_TURN_MISSING')
-      onStarted(turnId)
-      hardTimer = setTimeout(() => { timedOut = true; interrupt() }, hardTimeoutMs)
+      await onStarted(turnId)
       for (const message of early) consume(message)
       if (signal?.aborted) interrupt()
       armIdleTimeout()

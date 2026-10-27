@@ -6,6 +6,10 @@ import { randomUUID } from 'node:crypto'
 
 export const defaultMailboxFile = () => join(homedir(), '.dsh', 'codex-bridge', 'mailbox.sqlite3')
 const MAX_TEXT_BYTES = 64 * 1024
+const messageKind = value => {
+  if (!['chat', 'review', 'write'].includes(value)) throw Error('Kind must be chat, review or write')
+  return value
+}
 const identity = (value, label) => {
   if (typeof value !== 'string' || !/^[\w.-]{1,160}$/.test(value)) throw Error(`Invalid ${label}`)
   return value
@@ -32,7 +36,9 @@ export class CodexMailbox {
       chmodSync(file, 0o600)
       this.db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON')
       const version = this.db.prepare('PRAGMA user_version').get().user_version
-      if (version !== 0 && version !== 1) throw Error('Unsupported mailbox schema')
+      if (![0, 1, 2].includes(version)) throw Error('Unsupported mailbox schema')
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS messages (
           id TEXT PRIMARY KEY, session_id TEXT NOT NULL, body TEXT NOT NULL,
@@ -45,8 +51,21 @@ export class CodexMailbox {
           singleton INTEGER PRIMARY KEY CHECK(singleton=1), consumer TEXT NOT NULL,
           last_seen_ms INTEGER NOT NULL, expires_at_ms INTEGER NOT NULL
         );
-        PRAGMA user_version=1;
       `)
+      const columns = new Set(this.db.prepare('PRAGMA table_info(messages)').all().map(column => column.name))
+      if (!columns.has('kind')) {
+        this.db.exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'write'")
+      }
+      for (const [column, definition] of [
+        ['delivery_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+        ['delivery_last_attempt_at_ms', 'INTEGER'],
+        ['delivery_retry_after_ms', 'INTEGER NOT NULL DEFAULT 0'],
+      ]) {
+        if (!columns.has(column)) this.db.exec(`ALTER TABLE messages ADD COLUMN ${column} ${definition}`)
+      }
+      this.db.exec('PRAGMA user_version=2; COMMIT')
+      this.deliveryInFlight = new Set()
+      } catch (error) { this.db.exec('ROLLBACK'); throw error }
     } catch (error) { this.db.close(); throw error }
   }
 
@@ -88,15 +107,16 @@ export class CodexMailbox {
     })
   }
 
-  enqueue({ id = randomUUID(), sessionId, text }, nowMs = Date.now()) {
+  enqueue({ id = randomUUID(), sessionId, text, kind = 'write' }, nowMs = Date.now()) {
     identity(id, 'message id'); identity(sessionId, 'session id'); textValue(text); clock(nowMs)
+    messageKind(kind)
     if (!sessionId.startsWith('session-')) throw Error('A DSH session id is required for replies')
     return this.transaction(() => {
       const previous = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id)
       if (previous) {
-        if (previous.session_id !== sessionId || previous.body !== text) throw Error('Message id already belongs to different content')
-      } else this.db.prepare('INSERT INTO messages(id,session_id,body,created_at_ms,delivery_request_id) VALUES(?,?,?,?,?)')
-        .run(id, sessionId, text, nowMs, randomUUID())
+        if (previous.session_id !== sessionId || previous.body !== text || previous.kind !== kind) throw Error('Message id already belongs to different content')
+      } else this.db.prepare('INSERT INTO messages(id,session_id,body,created_at_ms,delivery_request_id,kind) VALUES(?,?,?,?,?,?)')
+        .run(id, sessionId, text, nowMs, randomUUID(), kind)
       return { ...this.read(id, nowMs), receiver: this.receiver(nowMs), wakesCodex: false }
     })
   }
@@ -106,7 +126,7 @@ export class CodexMailbox {
     const row = this.db.prepare('SELECT * FROM messages WHERE id=?').get(id)
     if (!row) return null
     return {
-      id: row.id, sessionId: row.session_id, text: row.body, createdAtMs: row.created_at_ms,
+      id: row.id, sessionId: row.session_id, text: row.body, kind: row.kind, createdAtMs: row.created_at_ms,
       state: row.delivered_at_ms !== null ? 'response-queued'
         : row.response !== null ? 'response-ready'
           : row.lease_until_ms > nowMs ? 'claimed' : 'pending',
@@ -115,14 +135,21 @@ export class CodexMailbox {
     }
   }
 
-  claim(consumer, { nowMs = Date.now(), leaseMs = 90000, limit = 5 } = {}) {
+  claim(consumer, { nowMs = Date.now(), leaseMs = 90000, limit = 5, excludeIds = [], kinds = ['chat', 'review', 'write'] } = {}) {
     identity(consumer, 'consumer'); clock(nowMs); duration(leaseMs)
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw Error('Limit must be 1..20')
+    if (!Array.isArray(excludeIds) || excludeIds.length > 30) throw Error('Invalid active message ids')
+    excludeIds.forEach(id => identity(id, 'message id'))
+    if (!Array.isArray(kinds) || !kinds.length || kinds.length > 3) throw Error('Invalid task kinds')
+    kinds.forEach(messageKind)
     this.heartbeat(consumer, nowMs, leaseMs)
     return this.transaction(() => {
       const rows = this.db.prepare(`SELECT id FROM messages WHERE response IS NULL
-        AND (consumer IS NULL OR lease_until_ms<=? OR consumer=?) ORDER BY created_at_ms,id LIMIT ?`)
-        .all(nowMs, consumer, limit)
+        AND (consumer IS NULL OR lease_until_ms<=? OR consumer=?)
+        AND kind IN (${kinds.map(() => '?').join(',')})
+        ${excludeIds.length ? `AND id NOT IN (${excludeIds.map(() => '?').join(',')})` : ''}
+        ORDER BY created_at_ms,id LIMIT ?`)
+        .all(nowMs, consumer, ...kinds, ...excludeIds, limit)
       const update = this.db.prepare('UPDATE messages SET consumer=?,lease_until_ms=? WHERE id=?')
       for (const { id } of rows) update.run(consumer, nowMs + leaseMs, id)
       return rows.map(({ id }) => this.read(id, nowMs))
@@ -144,18 +171,59 @@ export class CodexMailbox {
     })
   }
 
-  async deliver(client, { id, now = Date.now } = {}) {
+  async deliver(client, { id, now = Date.now, continueOnError = false } = {}) {
     if (id !== undefined) identity(id, 'message id')
     const rows = this.db.prepare(`SELECT * FROM messages WHERE response IS NOT NULL AND delivered_at_ms IS NULL
-      ${id === undefined ? '' : 'AND id=?'} ORDER BY responded_at_ms,id LIMIT 20`).all(...(id === undefined ? [] : [id]))
-    const delivered = []
-    for (const row of rows) {
+      ${id === undefined ? '' : 'AND id=?'} ${continueOnError ? 'AND delivery_retry_after_ms<=?' : ''}
+      ORDER BY responded_at_ms,id LIMIT 20`)
+      .all(...(id === undefined ? [] : [id]), ...(continueOnError ? [clock(now())] : []))
+      .filter(row => !this.deliveryInFlight.has(row.id))
+    rows.forEach(row => this.deliveryInFlight.add(row.id))
+    const delivered = new Array(rows.length)
+    const failedSessions = new Set()
+    const retryDelayMs = 30000
+    const send = async (row, index) => {
+      if (failedSessions.has(row.session_id)) return
+      const attemptedAtMs = clock(now())
+      this.db.prepare(`UPDATE messages SET delivery_attempts=delivery_attempts+1,
+        delivery_last_attempt_at_ms=?,delivery_retry_after_ms=? WHERE id=?`)
+        .run(attemptedAtMs, attemptedAtMs + retryDelayMs, row.id)
       // Stable DSH request identity closes the crash window between admission and local acknowledgement.
-      await client.send(row.session_id, `[Codex 协作回复 / mailbox ${row.id}]\n${row.response}`, row.delivery_request_id, { mode: 'steer' })
-      this.db.prepare('UPDATE messages SET delivered_at_ms=? WHERE id=? AND delivered_at_ms IS NULL').run(clock(now()), row.id)
-      delivered.push({ id: row.id, state: 'response-queued' })
+      try {
+        await client.send(row.session_id, `[Codex 协作回复 / mailbox ${row.id}]\n${row.response}`, row.delivery_request_id, { mode: 'steer' })
+      } catch (error) {
+        // Persist only attempt timing, never server errors or possibly secret response bodies.
+        this.db.prepare(`UPDATE messages SET delivery_retry_after_ms=?
+          WHERE session_id=? AND response IS NOT NULL AND delivered_at_ms IS NULL`)
+          .run(clock(now()) + retryDelayMs, row.session_id)
+        failedSessions.add(row.session_id)
+        if (!continueOnError) throw error
+        return
+      }
+      this.db.prepare('UPDATE messages SET delivered_at_ms=?,delivery_retry_after_ms=0 WHERE id=? AND delivered_at_ms IS NULL')
+        .run(clock(now()), row.id)
+      delivered[index] = { id: row.id, state: 'response-queued' }
     }
-    return delivered
+    try {
+      if (!continueOnError) {
+        // Explicit CLI retries remain immediate and report the first transport failure.
+        for (let index = 0; index < rows.length; index++) await send(rows[index], index)
+      } else {
+        let next = 0
+        const worker = async () => {
+          while (next < rows.length) {
+            const index = next++
+            await send(rows[index], index)
+          }
+        }
+        const workers = await Promise.allSettled(Array.from({ length: Math.min(4, rows.length) }, worker))
+        const failed = workers.find(result => result.status === 'rejected')
+        if (failed) throw failed.reason
+      }
+    } finally {
+      rows.forEach(row => this.deliveryInFlight.delete(row.id))
+    }
+    return delivered.filter(Boolean)
   }
 
   status(nowMs = Date.now()) {

@@ -6,7 +6,7 @@ import { DshBridgeClient } from './dsh-bridge-client.mjs'
 
 const usage = `DSH → Codex durable local mailbox (no API key, no extra listener)
   node scripts/codex-mailbox.mjs status
-  node scripts/codex-mailbox.mjs send --session <DSH session-id> --file <UTF-8 text or -> [--id <stable-id>]
+  node scripts/codex-mailbox.mjs send --session <DSH session-id> --file <UTF-8 text or -> [--id <stable-id>] [--kind chat|review|write]
   node scripts/codex-mailbox.mjs read --id <message-id>
   node scripts/codex-mailbox.mjs receive --consumer <name> [--wait-ms <0..45000>]
   node scripts/codex-mailbox.mjs heartbeat --consumer <name>
@@ -38,7 +38,7 @@ let mailbox
 try {
   const { positionals, values } = parseArgs({ allowPositionals: true, options: {
     mailbox: { type: 'string' }, connection: { type: 'string' }, session: { type: 'string' },
-    file: { type: 'string' }, id: { type: 'string' }, consumer: { type: 'string' },
+    file: { type: 'string' }, id: { type: 'string' }, consumer: { type: 'string' }, kind: { type: 'string' },
     'wait-ms': { type: 'string' }, help: { type: 'boolean' }
   } })
   const command = positionals[0] ?? 'status'
@@ -49,7 +49,7 @@ try {
     let result
     switch (command) {
       case 'status': result = mailbox.status(); break
-      case 'send': result = mailbox.enqueue({ id: values.id, sessionId: required(values, 'session'), text: await input(required(values, 'file')) }); break
+      case 'send': result = mailbox.enqueue({ id: values.id, sessionId: required(values, 'session'), text: await input(required(values, 'file')), kind: values.kind ?? 'write' }); break
       case 'read': result = mailbox.read(required(values, 'id')); break
       case 'heartbeat': result = mailbox.heartbeat(required(values, 'consumer')); break
       case 'receive': {
