@@ -33,7 +33,7 @@ function continuousDirection(plan: ExpressionPlan): string {
   if (!emotions) return plan.mode === 'support' ? SUPPORT_ANCHOR : ''
   const evidence = evidenceGuidance(emotions.displays)
   if (plan.mode === 'support') return [SUPPORT_ANCHOR, ...evidence].slice(0, limit).join('')
-  if (plan.mode === 'task') return emotions.drives.contact > .6 ? '正事答完可多留半句，不追问。' : '只答正事，不加寒暄。'
+  if (plan.mode === 'task') return emotions.drives.contact > .6 ? '正事答完可多留半句，不追问。' : '先把具体事情讲清楚，语气自然。'
   if (plan.mode === 'creative') return emotions.displays.some(label => POSITIVE_DISPLAYS.includes(label)) || emotions.pad.emotion.pleasure > .3 ? '按对方要求写，气氛可略轻快。' : ''
   return [
     ...evidence,
