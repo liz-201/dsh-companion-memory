@@ -13,6 +13,15 @@ export function doctorConfig(args, home) {
   }
   const parsed = load(readFileSync(file, 'utf8'))
   const row = Array.isArray(parsed) ? parsed.find(row => row?.id === 'dsh-companion-memory' || row?.name === 'dsh-companion-memory') : undefined
-  if (Array.isArray(parsed) && !row) throw new Error(`Profile 未包含 dsh-companion-memory：${file}`)
+  if (Array.isArray(parsed) && !row) {
+    const manifestFile = join(home, 'profiles', 'desktop', 'package.json')
+    const manifest = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, 'utf8')) : {}
+    const bundles = manifest.dsh?.profile?.bundles
+    const removed = parsed.some(item => item?.remove === 'dsh-companion-memory' || Array.isArray(item?.remove) && item.remove.includes('dsh-companion-memory'))
+    if (!explicit && !removed && Array.isArray(bundles) && bundles.includes('dsh-companion-memory')) {
+      return { raw: undefined, evidence: `${manifestFile} 的 bundle 默认配置（无 profile 覆盖）`, defaults: false }
+    }
+    throw new Error(`Profile 未包含已启用的 dsh-companion-memory：${file}`)
+  }
   return { raw: Array.isArray(parsed) ? row.config : parsed, evidence: file, defaults: false }
 }

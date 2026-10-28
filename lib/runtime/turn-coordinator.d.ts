@@ -18,6 +18,7 @@
  *   · 任何一步抛错都转成 TurnOutcome.failed，不把异常抛。QQ 桥。
  */
 import type { Config } from '../config.js';
+import type { EmotionAppraisal } from '../domain/emotion-appraisal.js';
 import { type Clock, type DeliveryReceipt, type IdentityBinding, type RawMessage } from '../domain/types.js';
 import type { Repositories } from '../storage/repositories.js';
 import type { Retriever } from '../memory/retriever.js';
@@ -29,6 +30,10 @@ import type { ConversationQueue } from './conversation-queue.js';
 import { Metrics } from './metrics.js';
 import type { BackgroundQueue } from './background-queue.js';
 export interface ModelCallRequest {
+    images?: {
+        data: string;
+        mediaType: 'image/png';
+    }[];
     turnId: string;
     /** 已装配好的完整输入（人格 + 状。+ 记忆 + 正文）。*/
     systemText: string;
@@ -90,6 +95,7 @@ export interface TurnOutcome {
     durationMs: number;
 }
 export interface TurnCoordinatorDeps {
+    beforeContext?: (query: string, binding: IdentityBinding) => Promise<void>;
     config: Config;
     repos: Repositories;
     retriever: Retriever;
@@ -113,11 +119,20 @@ export declare class TurnCoordinator {
     private readonly clock;
     private readonly counter;
     private readonly expression;
+    private readonly observations;
     constructor(deps: TurnCoordinatorDeps);
     recordObservationUsage(turnId: string, attempt: number, usage: ModelChunk['usage']): void;
+    /** One bounded extraction shared by pre-reply evaluation and the durable retry queue. */
+    requestObservation(binding: IdentityBinding, message: RawMessage, id?: string, attempt?: number, previousError?: string, options?: {
+        callModel?: ModelCaller;
+        active?: () => boolean;
+    }): Promise<void>;
+    observeBeforeReply(binding: IdentityBinding, message: RawMessage): Promise<void>;
     /** Apply background observations to a persisted host message without generating a second reply. */
     observe(binding: IdentityBinding, message: RawMessage, payload: EvtPayload, options?: {
         producer?: 'background_observer' | 'local_rule';
+        appraisals?: EmotionAppraisal[];
+        skipLegacy?: boolean;
     }): Promise<void>;
     /**
      * 处理一条入站消息。返回的结果只用来看日志/测试，调用方不依赖它做业务流程。

@@ -8,7 +8,7 @@ import { backupDirectory, backupNow } from './backup.js'
 import type { Repositories } from './repositories.js'
 
 const digest = (text: string): string => createHash('sha256').update(text).digest('hex')
-const TABLES = ['conversations', 'identity_links', 'appraisals', 'relationship_episodes', 'affect_events', 'memories', 'tasks', 'background_jobs', 'deletion_tombstones', 'audit_events', 'episodic_annotations', 'expression_habits', 'proactive_feedback', 'expression_audits']
+const TABLES = ['conversations', 'identity_links', 'appraisals', 'relationship_episodes', 'affect_events', 'memories', 'tasks', 'background_jobs', 'deletion_tombstones', 'audit_events', 'episodic_annotations', 'expression_habits', 'proactive_feedback', 'expression_audits', 'response_events', 'emotion_appraisals']
 
 export function sharedOwnerPrincipal(config: Config, ownerId: string): string {
   return `${config.companion.id}:owner:${ownerId}`

@@ -34,9 +34,9 @@ test('extract retries correct the contract, then persist memory, appraisal prove
   const f = fixture()
   const l = local(f, async function* (request, n) {
     const input = JSON.parse(request.userText)
-    assert.match(input.outputContract, /<evt>/)
+    assert.match(input.outputContract, /<observation>/)
     if (n === 1) { yield { text: '你好，我是聊天助手' }; return }
-    assert.match(input.correction, /Missing or malformed <evt>/)
+    assert.match(input.correction, /Missing or oversized observation envelope/)
     yield { text: '<evt>{"v":1,"e":[{"k":"appreciation","to":"self","i":"neutral","s":1,"c":0.9}],"m":[{"k":"preference","t":"喜欢蓝色","q":"我喜欢蓝色"}]}</evt>' }
     yield { text: '', usage: { inputTokens: 30, outputTokens: 20, provider: 'fake', model: 'fake' } }
   })
@@ -74,16 +74,17 @@ test('terminal model failure retains diagnostics and applies conservative fallba
     await l.background.tick(now + 10000)
     const job = f.db.get("SELECT * FROM background_jobs WHERE kind = 'extract'")
     assert.equal(job.status, 'failed')
-    assert.match(job.last_error, /Missing or malformed <evt>.*普通聊天输出/)
+    assert.match(job.last_error, /Missing or oversized observation envelope/)
     assert.equal(f.db.get('SELECT producer FROM appraisals').producer, 'local_rule')
     assert.equal(f.db.get('SELECT status FROM turns').status, 'fallback')
     assert.equal(f.db.get('SELECT COUNT(*) AS n FROM affect_events').n, 1)
     assert.equal(f.db.get('SELECT COUNT(*) AS n FROM memories').n, 0)
     assert.equal(f.db.get("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'runtime-degraded'").n, 2)
-    // A later manual repair can learn facts but must not award the fallback affect twice.
+    // A later repair replaces the conservative fallback, preserving only one active contribution.
     const message = f.repos.getRawMessage(`${l.binding.conversationId}:thanks`)
     await f.coordinator.observe(l.binding, message, { v: 1, e: [{ k: 'appreciation', to: 'self', i: 'neutral', s: 3, c: 1 }] })
-    assert.equal(f.db.get('SELECT COUNT(*) AS n FROM affect_events').n, 1)
+    assert.equal(f.db.get("SELECT COUNT(*) AS n FROM affect_events WHERE status='active'").n, 1)
+    assert.equal(f.db.get("SELECT COUNT(*) AS n FROM affect_events WHERE status='retracted'").n, 1)
     assert.equal(f.db.get('SELECT status FROM turns').status, 'completed')
   } finally { l.dispose(); f.close() }
 })

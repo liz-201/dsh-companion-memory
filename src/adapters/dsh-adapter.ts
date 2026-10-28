@@ -121,14 +121,26 @@ export async function* streamFromHost(
 
   let reasoningEffort = route.reasoningEffort
   const modelInfo = method(llm, 'resolveModelInfo')
+  const imageBlocks: {type:'image';attachment:Record<string,unknown>}[] = []
+  if (request.images?.length) {
+    const info = modelInfo ? asRecord(await modelInfo(route.provider,route.model,request.signal)) : null
+    if (!Array.isArray(info?.['inputModalities']) || !info['inputModalities'].includes('image')) throw Error('当前模型未声明图像输入能力')
+    if (request.images.length>1 || request.images.some(i=>i.mediaType!=='image/png'||i.data.length>6*1024*1024)) throw Error('图像请求超出限制')
+    const saveImages=method(hostService(ctx,'attachments'),'saveImages')
+    if(!saveImages)throw Error('宿主没有可用的图像附件接口')
+    const refs=await saveImages(request.images.map(image=>({data:Buffer.from(image.data,'base64'),mediaType:image.mediaType,name:'companion-selected-window.png'})))
+    if(!Array.isArray(refs)||refs.length!==request.images.length)throw Error('宿主图像附件返回无效')
+    for(const ref of refs){const value=asRecord(ref);if(typeof value?.['attachmentId']!=='string')throw Error('宿主图像引用无效');imageBlocks.push({type:'image',attachment:value})}
+  }
   if (request.thinking === 'disabled' && modelInfo) {
     const info = asRecord(await modelInfo(route.provider, route.model, request.signal))
     const reasoning = asRecord(info?.['reasoning'])
     if (reasoning) {
       const efforts = reasoning['efforts']
       const disabled = Array.isArray(efforts) ? efforts.map(asRecord).find(effort => ['none', 'off', 'disabled'].includes(String(effort?.['id']))) : undefined
-      if (!disabled) throw new Error('当前模型没有声明关闭思考的选项；请配置 generation.thinking=default')
-      reasoningEffort = String(disabled['id'])
+      // 模型没有声明可关闭思考的档位时退回宿主默认档继续调用：后台抽取与表达修复只要
+      // 抛一次错，这条消息的记忆与整轮表达就一起丢了，代价远大于多花一点推理 token。
+      reasoningEffort = disabled ? String(disabled['id']) : undefined
     } else reasoningEffort = undefined
   }
 
@@ -138,7 +150,7 @@ export async function* streamFromHost(
     ...(reasoningEffort ? { reasoningEffort } : {}),
     messages: [
       { id: randomUUID(), role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: request.systemText }] },
-      { id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: request.userText }] },
+      { id: randomUUID(), role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: request.userText },...imageBlocks] },
     ],
     ...(request.signal ? { signal: request.signal } : {}),
   })) as unknown

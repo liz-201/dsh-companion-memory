@@ -7,6 +7,10 @@ import { createTransferHandler } from './cloud/transfer-ui.js'
 import { installLocalIntegration } from './adapters/local-integration.js'
 import { hostService } from './adapters/host-service.js'
 import { ComputerEvents } from './runtime/computer-events.js'
+import { WindowPerception } from './runtime/window-perception.js'
+import { continuousAffect } from './storage/continuous-affect.js'
+import { EMOTION_CONTRACT,parseObservation } from './runtime/emotion-observation.js'
+import { matchSourceQuote } from './memory/quote-match.js'
 import { observeComputerEvent } from './proactive/computer-opportunities.js'
 import { buildCandidates } from './proactive/candidate-builder.js'
 import { PluginPanel } from './panel/controller.js'
@@ -132,7 +136,7 @@ export interface CompanionService {
   consumed(turnId: string): boolean
   shutdown(): Promise<void>
 }
-const VERSION = '0.3.0-dev.6'
+const VERSION = '0.3.0-dev.7'
 function logger(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
 const prefix = '[companion]'
 if (level === 'error')
@@ -187,7 +191,9 @@ const firstKnownDevice = repos.db.all<{ key: string; value: string }>("SELECT ke
 const bootstrapOwnership = randomUUID()
 if (repos.db.run('INSERT OR IGNORE INTO proactive_ownership VALUES (?, ?, ?, ?, NULL)', config.companion.id, firstKnownDevice, bootstrapOwnership, '[]').changes) repos.setSetting('local.proactive.bootstrap-ownership', bootstrapOwnership, Date.now())
 const desktop = new DesktopDelivery(repos)
-const computer = new ComputerEvents({ settings: () => config.computerEvents, onEvent: event => {
+repos.db.run("DELETE FROM plugin_settings WHERE key='local.notification-state'")
+const computer = new ComputerEvents({ settings: () => config.computerEvents.enabled ? config.computerEvents : { ...config.computerEvents, enabled:config.perception.enabled, foregroundApplications:false,network:false,resources:false,watchDirectories:[] },
+onSample:snapshot=>{if(active)repos.setSetting('local.notification-state',JSON.stringify({at:snapshot.sampledAtMs,state:snapshot.notificationState??'unknown'}),snapshot.sampledAtMs)}, onEvent: event => {
   if (!active || !transfer.isReady) return
   try { observeComputerEvent(repos, config, event, desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean)) } catch { logger('warn', '电脑事件线索处理未完成。') }
 } })
@@ -205,6 +211,11 @@ const transport: QqTransport = createTransport(config)
 const modelCaller = new HostModelCaller(ctx, {
  log: (message) => logger('info', message) })
 const expression = new ExpressionRuntime(repos, config, modelCaller.call)
+const perception = new WindowPerception({config,repos,callModel:modelCaller.call,
+  onUsage:(turnId,usage)=>ledger.record({turnId,phase:'perception',provider:usage?.provider??'host',model:usage?.model??'host-default',inputTokens:usage?.inputTokens??'unknown',outputTokens:usage?.outputTokens??'unknown',cacheHitTokens:usage?.cacheHitTokens??'unknown',cacheMissTokens:usage?.cacheMissTokens??'unknown',reasoningTokens:usage?.reasoningTokens??'unknown',retry:0,atMs:Date.now()}),
+  binding:()=>desktop.list().map(item=>desktop.binding(item.conversationId)).find(Boolean)??null,
+  onEvent:(event,binding)=>{if(active&&transfer.isReady)observeComputerEvent(repos,config,event,[binding])},
+})
 const shareSources = new ShareSources(repos, config)
 const queue = new ConversationQueue({
 })
@@ -221,6 +232,7 @@ transport,
 resolveChatId: (conversationId) => chatByConversation.get(conversationId) ?? null,
 log: (message) => logger('warn', message),  })
 const coordinator = new TurnCoordinator({
+beforeContext:(query,binding)=>perception.prepareContext(query,binding),
     config,    repos,
 retriever,    updater,    queue,    metrics,    ledger,    prompts,
 background,
@@ -229,6 +241,7 @@ callModel: modelCaller.call,
 deviceText: device.text,
 log: logger,  })
 const outbox = new OutboxWorker({
+beforeDelivery:async()=>{await perception.revalidate();if((config.computerEvents.enabled||config.perception.enabled)&&!await computer.sample())repos.db.run("DELETE FROM plugin_settings WHERE key='local.notification-state'")},
     config,    repos,
 transport,    metrics,
 chatForConversation: (conversationId) => desktop.has(conversationId) ? `desktop:${conversationId}` : chatByConversation.get(conversationId)?.startsWith('desktop:') ? null : chatByConversation.get(conversationId) ?? null,
@@ -283,7 +296,7 @@ if (/<\/?(?:say|evt)\b/.test(text)) {
 return text === '' ? null : text  }
 const scheduler = new ProactiveScheduler({
     config,    repos,    metrics,
-beforeScan: nowMs => shareSources.scan(desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean), nowMs),
+beforeScan: async nowMs => {await perception.revalidate();await shareSources.scan(desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean), nowMs)},
 listConversations: () =>      [...chatByConversation.entries()].filter(([id, chatId]) => !id.startsWith('review:') && (!chatId.startsWith('desktop:') || desktop.has(id))).map(([conversationId, chatId]) => {
 const binding = bindingForConversation(conversationId, chatId)
 const stored = binding === null ? null : repos.getSnapshot(binding.principalId)
@@ -480,9 +493,12 @@ delivery: transport.configured ? 'bridge' : 'plain-body-only',
 chats: chatByConversation.size,
 counts: repos.counts(),
 metrics: metrics.summary(),
+usage: ledger.summary(),
 background: background.stats(),
 scheduler: scheduler.running,
 computer: { settings: config.computerEvents, status: computer.status() },
+perception: perception.status(),
+continuous: continuousAffect(repos,config,owner.principalId,Date.now()),
 database: db.file,
 capabilities: service.compatibility().capabilities,      }
     }
@@ -505,6 +521,7 @@ async shutdown() {
 ctx.provide?.('companionMemory', service)
 ctx.emit?.('companionMemory/available')
 const localDisposer = installLocalIntegration({
+  beforeContext:(query,binding)=>perception.prepareContext(query,binding),
   ...(ctx.on ? { on: ctx.on.bind(ctx) } : {}), config, owner, repos, retriever, background, coordinator,
   ready: () => transfer.isReady, whenReady: () => transfer.ready,
   callModel: modelCaller.call, prompts, deviceText: device.text, active: () => active, personas,
@@ -621,10 +638,26 @@ if (ctx.inject) {
   webDisposer = () => { void fiber.dispose() }
 } else webDisposer = registerWeb(ctx)
 // ── 定时器 ──────────────────────────────────────────────────────────────────
-panel = new PluginPanel({ config, db, repos, owner, computer,
+let extractionProbeRunning=false
+panel = new PluginPanel({ config, db, repos, owner, computer, perception,
+  probeExtraction:async()=>{
+    if(extractionProbeRunning)throw Error('已有抽取验证正在进行。')
+    extractionProbeRunning=true
+    const turnId=`extraction-probe:${randomUUID()}`,started=Date.now(),controller=new AbortController()
+    const userMessage='我喜欢蓝色，请记住。谢谢你还记得这件事。'
+    let output='',usage:import('./runtime/turn-coordinator.js').ModelChunk['usage'],timer:ReturnType<typeof setTimeout>
+    try{
+      const run=async()=>{for await(const chunk of modelCaller.call({turnId,thinking:'disabled',signal:controller.signal,systemText:prompts.protocol()+'\n'+EMOTION_CONTRACT,userText:JSON.stringify({userMessage,priorExpectations:[],priorBehaviors:[]})})){output+=chunk.text;if(chunk.usage)usage=chunk.usage;if(output.length>16000)throw Error('抽取验证输出过长。')}}
+      await Promise.race([run(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('抽取验证超时。'))},config.emotion.backgroundTimeoutMs)})])
+      const parsed=parseObservation(output)
+      if(parsed.appraisals?.some(a=>!matchSourceQuote(userMessage,a.quote)))throw Error('模型抽取引用未通过原文校验。')
+      return {text:'当前模型已完成真实抽取调用，协议与原文引用校验通过；未写入记忆、未发送聊天消息。',thinking:'disabled',elapsedMs:Date.now()-started,observationVersion:parsed.appraisals===undefined?1:2,appraisals:parsed.appraisals?.length??0,usage:usage??'unknown',persistedMemory:false}
+    }catch{throw new Error('抽取验证未通过；请检查模型能力、后台超时与网络。')}
+    finally{clearTimeout(timer!);coordinator.recordObservationUsage(turnId,1,usage);extractionProbeRunning=false}
+  },
   commands: { config, db, repos, retriever, updater, metrics, transfer, manageUrl, compatibility: () => service.compatibility(), scheduler: { status: () => ({ enabled: config.proactive.enabled, pending: repos.counts().outbox ?? 0, lastScanAtMs: null, nextCheckAtMs: null }), setEnabled: value => { config.proactive.enabled = value } } },
   status: () => service.status(), activeTargets: () => desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean),
-  settingsChanged: () => { computer.stop(); computer.start(); scheduler.stop(); if (active && transfer.isReady) scheduler.start() },
+  settingsChanged: () => { computer.stop();repos.db.run("DELETE FROM plugin_settings WHERE key='local.notification-state'"); computer.start(); perception.configure(); scheduler.stop(); if (active && transfer.isReady) scheduler.start() },
   scan: () => scheduler.scan(),
   preview: async binding => {
     const built = buildCandidates({ config, repos, conversationId: binding.conversationId, principalId: binding.principalId, nowMs: Date.now(), mainTurnInFlight: queue.isBusy(binding.conversationId) || desktop.isBusy(binding.conversationId) })
@@ -640,8 +673,8 @@ panel = new PluginPanel({ config, db, repos, owner, computer,
 let outboxTimer: ReturnType<typeof setInterval> | null = null
 let backupTimer: ReturnType<typeof setInterval> | null = null
 transfer.start()
-if (transfer.isReady) { background.start(); scheduler.start(); computer.start() }
-else void transfer.ready.then(() => { if (active) { background.start(); scheduler.start(); computer.start() } })
+if (transfer.isReady) { background.start(); scheduler.start(); computer.start(); perception.configure() }
+else void transfer.ready.then(() => { if (active) { background.start(); scheduler.start(); computer.start(); perception.configure() } })
 outboxTimer = setInterval(() => {
 if (!transfer.isReady) return
 void outbox.runOnce().catch((error: unknown) => {
@@ -676,6 +709,7 @@ clearInterval(backupTimer)
 backupTimer = null    }
 scheduler.stop()
 computer.stop()
+perception.stop()
 background.stop()
 if (typeof
 commandDisposer === 'function') (commandDisposer as () => void)()

@@ -10,12 +10,13 @@ export interface ComputerEventsSettings {
 }
 export interface ComputerEvent {
     id: string;
-    kind: 'idle_return' | 'foreground_app_changed' | 'network_restored' | 'battery_low' | 'resource_pressure' | 'file_changed';
+    kind: 'idle_return' | 'foreground_app_changed' | 'network_restored' | 'battery_low' | 'resource_pressure' | 'file_changed' | 'interface_observed';
     occurredAtMs: number;
     summary: string;
     details: Record<string, string | number | boolean | null>;
 }
 export interface ComputerSnapshot {
+    notificationState?: 'accepts' | 'blocked' | 'unknown';
     sampledAtMs: number;
     idleSeconds: number | null;
     foregroundApp: string | null;
@@ -35,6 +36,7 @@ export interface ComputerEventsStatus {
     unavailableDirectories: string[];
 }
 export interface ComputerEventsOptions {
+    onSample?: (snapshot: ComputerSnapshot) => void;
     settings: () => ComputerEventsSettings;
     onEvent: (event: ComputerEvent) => void;
     readSnapshot?: () => Promise<ComputerSnapshot>;
@@ -56,6 +58,7 @@ export interface IdleState {
 export declare class ComputerEvents {
     private readonly settings;
     private readonly onEvent;
+    private readonly onSample?;
     private readonly readSnapshot;
     private readonly now;
     private recentEvents;

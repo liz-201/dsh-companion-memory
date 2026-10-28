@@ -42,6 +42,7 @@ export type OutboxOutcome = {
     chatId: string | null;
 };
 export interface OutboxWorkerOptions {
+    beforeDelivery?: () => Promise<void>;
     config: Config;
     repos: Repositories;
     transport: QqTransport;

@@ -1,0 +1,124 @@
+import { createHash } from 'node:crypto'
+import type { Config } from '../config.js'
+import type { Repositories } from './repositories.js'
+import type { IdentityBinding, RawMessage } from '../domain/types.js'
+import { parseAppraisals, type EmotionAppraisal } from '../domain/emotion-appraisal.js'
+import { classifyOcc, type EmotionComponent } from '../domain/occ-classifier.js'
+import { projectDrives, respondDrive, type DriveState } from '../domain/drive-projector.js'
+import { projectPad, type TimedComponents } from '../domain/pad-projector.js'
+import { matchSourceQuote } from '../memory/quote-match.js'
+
+export interface ContinuousAffectState {
+  version: 'continuous-v1'
+  parameterVersion: string
+  drives: DriveState
+  pad: ReturnType<typeof projectPad>
+  emotions: EmotionComponent[]
+  displays: string[]
+  evidenceIds: string[]
+  appraisalCount: number
+}
+interface Source { id: string; at: number }
+interface StoredAppraisal { id: string; vector: EmotionAppraisal; at: number; sourceId: string }
+const cache = new WeakMap<Repositories, Map<string, { stamp: string; responses: Source[]; appraisals: StoredAppraisal[] }>>()
+
+/** Host binds all identities and quotes; model references are restricted to the supplied owner history. */
+export function saveEmotionAppraisals(repos: Repositories, binding: IdentityBinding, message: RawMessage, candidates: unknown, producer = 'background'): number {
+  const rows = parseAppraisals(candidates)
+  const owner = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', message.conversationId)
+  if (owner?.principal_id !== binding.principalId || message.conversationId!==binding.conversationId || message.role !== 'user' || repos.getRawMessage(message.id)?.deletedAtMs !== null || repos.getRawMessage(message.id)?.content!==message.content) throw Error('Invalid emotion source owner')
+  const valid = rows.map(vector => {
+    const quote = matchSourceQuote(message.content, vector.quote)
+    if (!quote) throw Error('Emotion quote is not present in source message')
+    if (vector.suppliedEvidenceRef) {
+      const prior = repos.db.get<{ vector_json: string; event_time_ms: number }>("SELECT a.vector_json,a.event_time_ms FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id WHERE a.id=? AND a.principal_id=? AND a.status='active' AND r.deleted_at_ms IS NULL", vector.suppliedEvidenceRef, binding.principalId)
+      if (!prior || prior.event_time_ms >= message.occurredAtMs || JSON.parse(prior.vector_json).prospect !== 'pending') throw Error('Invalid prior expectation reference')
+    }
+    const qualified={...vector,quote}
+    if(vector.agency==='self'&&vector.focus==='action'){
+      if(!vector.suppliedBehaviorRef){delete qualified.praiseworthiness;qualified.agency='unknown'}
+      else{
+        const behavior=repos.getRawMessage(vector.suppliedBehaviorRef)
+        const principal=behavior?repos.db.get<{principal_id:string}>('SELECT principal_id FROM conversations WHERE id=?',behavior.conversationId)?.principal_id:null
+        if(!behavior||behavior.role!=='assistant'||behavior.deletedAtMs!==null||principal!==binding.principalId||behavior.occurredAtMs>message.occurredAtMs||behavior.seq>=message.seq)throw Error('Invalid prior behavior reference')
+      }
+    }
+    if((qualified.personalAttention??0)>.5&&!/(?:记得|记住|特意|还记|专门|remember|thoughtful)/i.test(message.content))delete qualified.personalAttention
+    if((qualified.relationshipThreat??0)>.5){
+      const relationship=repos.getSnapshot(binding.principalId)?.snapshot.relationship
+      if(!relationship||relationship.familiarity<.2||!/(?:比你|取代|代替你|不想再.{0,8}(?:你|聊)|不再.{0,8}(?:你|聊)|更喜欢.{0,12}(?:陪|聊天)|只想.{0,10}陪)/.test(message.content))delete qualified.relationshipThreat
+    }
+    return qualified
+  })
+  repos.db.transaction(() => {
+    for (let slot = 0; slot < valid.length; slot++) {
+      const vector = valid[slot]!, id = `emotion:${message.id}:${slot}`
+      const existing = repos.db.get<{ vector_json: string; status: string;revision:number }>('SELECT vector_json,status,revision FROM emotion_appraisals WHERE id=?', id)
+      const json = JSON.stringify(vector)
+      if (existing?.vector_json === json && existing.status === 'active') continue
+      if(existing)archiveAppraisal(repos,id,existing)
+      repos.db.run(`INSERT INTO emotion_appraisals(id,principal_id,conversation_id,source_message_id,slot,vector_json,evidence_quote,event_time_ms,status,revision,producer)
+        VALUES (?,?,?,?,?,?,?,?,'active',1,?) ON CONFLICT(id) DO UPDATE SET vector_json=excluded.vector_json,evidence_quote=excluded.evidence_quote,status='active',revision=emotion_appraisals.revision+1,producer=excluded.producer`, id,binding.principalId,message.conversationId,message.id,slot,json,vector.quote,message.occurredAtMs,producer)
+    }
+    // A corrected observation replaces its source's previous vector set, not an additional emotional hit.
+    repos.db.run("UPDATE emotion_appraisals SET status='retracted',revision=revision+1 WHERE source_message_id=? AND slot>=? AND status='active'",message.id,valid.length)
+  })
+  return valid.length
+}
+
+function archiveAppraisal(repos:Repositories,id:string,row:{vector_json:string;status:string;revision:number}):void{
+  const fingerprint=createHash('sha256').update(JSON.stringify([row.vector_json,row.status])).digest('hex').slice(0,16)
+  repos.db.run('INSERT OR IGNORE INTO emotion_appraisal_revisions VALUES(?,?,?,?,?,?)',`${id}:r:${row.revision}:${fingerprint}`,id,row.revision,row.vector_json,row.status,Date.now())
+}
+
+export function retractEmotionAppraisal(repos:Repositories,id:string,principalId:string):number{
+  return repos.db.transaction(()=>{
+    const row=repos.db.get<{vector_json:string;status:string;revision:number}>("SELECT vector_json,status,revision FROM emotion_appraisals WHERE id=? AND principal_id=? AND status='active'",id,principalId)
+    if(!row)return 0
+    archiveAppraisal(repos,id,row)
+    return repos.db.run("UPDATE emotion_appraisals SET status='retracted',revision=revision+1 WHERE id=?",id).changes
+  })
+}
+
+export function priorExpectations(repos: Repositories, principalId: string, beforeMs: number): { id: string; quote: string; desirability?: number }[] {
+  return repos.db.all<{ id: string; evidence_quote: string; vector_json: string }>("SELECT a.id,a.evidence_quote,a.vector_json FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id WHERE a.principal_id=? AND a.status='active' AND a.event_time_ms<? AND r.deleted_at_ms IS NULL AND json_extract(a.vector_json,'$.prospect')='pending' ORDER BY a.event_time_ms DESC LIMIT 8",principalId,beforeMs)
+    .map(row => ({ id: row.id,quote: row.evidence_quote,desirability: (JSON.parse(row.vector_json) as EmotionAppraisal).desirability }))
+}
+
+export function priorBehaviors(repos:Repositories,principalId:string,message:RawMessage):{id:string;text:string}[]{
+  return repos.db.all<{id:string;content:string}>("SELECT r.id,r.content FROM raw_messages r JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND r.role='assistant' AND r.deleted_at_ms IS NULL AND r.occurred_at_ms<=? AND r.seq<? ORDER BY r.seq DESC LIMIT 6",principalId,message.occurredAtMs,message.seq).map(r=>({id:r.id,text:r.content.slice(0,300)}))
+}
+
+/** Source-derived state: deletion, imports and late appraisals all use this same replay. No read writes. */
+export function continuousAffect(repos: Repositories, config: Config, principalId: string, nowMs: number): ContinuousAffectState | null {
+  if (!config.emotion.enabled) return null
+  const version = createHash('sha256').update(JSON.stringify(config.emotion)).digest('hex').slice(0,16)
+  const stamp = JSON.stringify(repos.db.get('SELECT revision,(SELECT data_version FROM pragma_data_version) AS external FROM continuous_meta WHERE singleton=1'))
+  let owners = cache.get(repos)
+  if (!owners) { owners = new Map(); cache.set(repos,owners) }
+  let history = owners.get(principalId)
+  if (!history || history.stamp !== stamp) {
+    const responses = repos.db.all<{ id: string; event_time_ms: number }>("SELECT e.source_message_id AS id,e.event_time_ms FROM response_events e JOIN raw_messages r ON r.id=e.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND e.status='active' AND r.deleted_at_ms IS NULL ORDER BY e.event_time_ms,e.source_message_id",principalId).map(row=>({id:row.id,at:row.event_time_ms}))
+    const appraisals = repos.db.all<{ id: string; vector_json: string; event_time_ms: number; source_message_id: string }>("SELECT a.id,a.vector_json,a.event_time_ms,a.source_message_id FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND a.principal_id=? AND a.status='active' AND r.deleted_at_ms IS NULL ORDER BY a.event_time_ms,a.source_message_id,a.slot",principalId,principalId)
+      // Vectors are strictly validated on extraction/import; reads only decode the authoritative rows.
+      .map(row=>({id:row.id,vector:JSON.parse(row.vector_json) as EmotionAppraisal,at:row.event_time_ms,sourceId:row.source_message_id}))
+    history = {stamp,responses,appraisals}; owners.set(principalId,history)
+    if (owners.size > 1000) owners.delete(owners.keys().next().value!)
+  }
+  const parameters = {contactTauHours:config.emotion.contactTauHours,responseRelief:config.emotion.responseRelief,cap:1}
+  let drives: DriveState = {atMs:history.responses[0]?.at ?? nowMs,contact:0,exploration:0,load:0,responses:0}
+  for (const response of history.responses) if(response.at<=nowMs) drives=respondDrive(drives,response.at,parameters)
+  drives=projectDrives(drives,nowMs,parameters)
+  const prior = new Map<string,EmotionAppraisal>(), timed:TimedComponents[]=[], emotions=new Map<string,number>(), displays=new Set<string>(), evidenceIds=new Set<string>()
+  for (const item of history.appraisals) {
+    if (item.at>nowMs) continue
+    const result=classifyOcc(item.vector,item.vector.suppliedEvidenceRef?prior.get(item.vector.suppliedEvidenceRef):undefined)
+    prior.set(item.id,item.vector)
+    const decay=Math.pow(2,-Math.max(0,nowMs-item.at)/(config.emotion.componentHalfLifeMinutes*60000))
+    timed.push({atMs:item.at,components:result.components,...(item.vector.controllability!==undefined?{control:item.vector.controllability}:{})})
+    for (const component of result.components) emotions.set(component.category,Math.min(1,(emotions.get(component.category)??0)+component.intensity*decay))
+    if(result.components.some(c=>c.intensity*decay>=.12)) { for(const label of result.displays)displays.add(label);evidenceIds.add(item.sourceId) }
+    if((item.vector.appealingness??0)>.3 && decay>.1)drives.exploration=Math.min(1,drives.exploration+.1*decay)
+  }
+  return {version:'continuous-v1',parameterVersion:version,drives,pad:projectPad(timed,nowMs,config.emotion.componentHalfLifeMinutes,config.emotion.moodHalfLifeMinutes),emotions:[...emotions].filter(([,v])=>v>=.05).map(([category,intensity])=>({category:category as EmotionComponent['category'],intensity})).sort((a,b)=>b.intensity-a.intensity).slice(0,6),displays:[...displays].slice(0,3),evidenceIds:[...evidenceIds].slice(-10),appraisalCount:history.appraisals.length}
+}

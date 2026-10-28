@@ -126,7 +126,32 @@ export interface IntegrationConfig {
     personaId: string;
     personaPresets: Record<string, PresetId>;
 }
+export interface EmotionConfig {
+    backgroundTimeoutMs: number;
+    enabled: boolean;
+    mode: 'background' | 'before-reply';
+    timeoutMs: number;
+    contactTauHours: number;
+    responseRelief: number;
+    componentHalfLifeMinutes: number;
+    moodHalfLifeMinutes: number;
+}
+export interface PerceptionConfig {
+    enabled: boolean;
+    mode: 'manual' | 'bounded-auto';
+    allowedApplications: string[];
+    uiAutomation: boolean;
+    imageUnderstanding: boolean;
+    allowCloudImages: boolean;
+    allowHostImageStorage: boolean;
+    minGapMinutes: number;
+    dailyModelCalls: number;
+    ttlMinutes: number;
+    stableSeconds: number;
+}
 export interface Config {
+    emotion: EmotionConfig;
+    perception: PerceptionConfig;
     personality: PersonalityOptions;
     expression: {
         mode: 'enforce' | 'diagnostic';

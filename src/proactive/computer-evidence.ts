@@ -1,6 +1,6 @@
 import type { Repositories } from '../storage/repositories.js'
 
-export interface ComputerEvidence { id: string; principalId: string; conversationId: string; summary: string; expiresAtMs: number }
+export interface ComputerEvidence { id: string; principalId: string; conversationId: string; summary: string; expiresAtMs: number;source?:'interface'|'system' }
 export function computerEvidence(repos: Repositories, id: string, principalId: string, conversationId: string, nowMs: number): ComputerEvidence | null {
   if (!id.startsWith('computer:')) return null
   try {

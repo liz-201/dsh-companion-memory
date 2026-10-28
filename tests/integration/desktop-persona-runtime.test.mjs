@@ -17,7 +17,7 @@ test('real Desktop local messages consolidate into searchable facts with observe
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'fixture', model: 'scripted' }) })
     ctx.provide('llm', { async *stream(request) {
       const system = request.messages[0].content[0].text
-      if (system.includes('后台记忆格式化器')) { yield { type: 'text-delta', text: '<evt>{"v":1,"e":[]}</evt>' }; return }
+      if (system.includes('独立的后台观察器')) { yield { type: 'text-delta', text: '<evt>{"v":1,"e":[]}</evt>' }; return }
       const transcript = request.messages[1].content[0].text
       calls.push(transcript)
       const source = transcript.match(/\[([^\]]+)\] seq=\d+ user:/)[1]

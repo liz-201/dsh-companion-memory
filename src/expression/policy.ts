@@ -7,5 +7,19 @@ export function renderPlan(plan: ExpressionPlan): string {
   const distance = plan.ease < .3 ? '初识有分寸，别自来熟。' : plan.ease < .55 ? '已熟一些，接具体话题。' : '相处熟悉，接话可以放松。'
   const mood = { neutral: '平常接话，不表演情绪。', interested: '有兴致，可多接一点。', supportive: '关注具体难处，少分析对方心理。', guarded: '表达审慎，不勉强热络。', hurt: '减少玩笑，可说具体在意的事。', firm: '可简短直接说不满，不扩大攻击。' }[plan.stance]
   const traits = [plan.warmth >= .45 ? '语气柔和，关心具体小事。' : '', plan.directness >= .7 ? '直截了当说观点。' : '', plan.reserve >= .7 && plan.ease < .55 ? '先少一点自我展开，熟后再放松。' : '', plan.conscientiousness >= .75 ? '认真落实具体事情，不必写成报告。' : '', plan.curiosity >= .75 ? '对新话题可以有具体好奇，不必每轮追问。' : '', plan.optimism >= .75 ? '愿意看到可能性，仍承认眼前困难。' : ''].join('')
-  return `${distance}${mood}${traits}${plan.playfulness > .6 ? '可偶尔接已认可的共同玩笑。' : '不强套梗。'}${plan.targetSentences ? `闲聊通常${plan.targetSentences.min}到${plan.targetSentences.max}句。` : '按当前任务充分说明。'}`
+  const emotions = plan.continuous
+  const direction = emotions && plan.mode === 'chat' ? [
+    emotions.displays.includes('委屈') ? '若提及不公，只说有依据的具体在意，不扩大责备。' : '',
+    emotions.displays.includes('心酸') ? '可以流露具体牵挂，承认无力，不编经历。' : '',
+    emotions.displays.includes('愧疚') ? '对已有证据的自身过失简短承担并落实修正。' : '',
+    emotions.displays.includes('吃味') ? '关系上的在意只轻轻表达，尊重正常社交，不控制或催回复。' : '',
+    emotions.displays.includes('被重视感') ? '回应对方记得的具体小事，可自然表达珍惜。' : '',
+    emotions.displays.includes('安心') ? '担忧解除后语气放松，勿虚构先前担忧。' : '',
+    emotions.drives.contact > .6 && plan.ease > .4 ? '接话可有牵挂感，但不查岗、不因沉默埋怨。' : '',
+    emotions.pad.mood.arousal < -.15 ? '节奏可放缓，不勉强热闹。' : '',
+  ].filter(Boolean).slice(0,2).join('') : ''
+  const lines=[distance+mood,direction,plan.targetSentences ? `闲聊通常${plan.targetSentences.min}到${plan.targetSentences.max}句。` : '按当前任务充分说明。',traits,plan.playfulness > .6 ? '可偶尔接已认可的共同玩笑。' : '不强套梗。']
+  const selected:string[]=[]
+  for(const line of lines)if(line&&estimateTokens([...selected,line].join('\n'))<=150)selected.push(line)
+  return selected.join('\n')
 }

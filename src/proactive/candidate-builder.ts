@@ -128,10 +128,15 @@ export function checkGates(input: CandidateInput): GateResult {
     }
 
     if (input.mainTurnInFlight === true) blocked.push('main-turn-in-flight')
+    if (config.computerEvents.enabled || config.perception.enabled) {
+        let sample:{at?:number;state?:string}={}
+        try { sample=JSON.parse(repos.getSetting('local.notification-state')??'{}') } catch {}
+        if(sample.state!=='accepts'||!sample.at||nowMs-sample.at>Math.max(120000,config.computerEvents.pollSeconds*2000)||sample.at>nowMs)blocked.push('notification-unavailable')
+    }
     if (Number(repos.getSetting(`proactive.snooze-until:${input.principalId}`) ?? 0) > nowMs) blocked.push('user-busy')
 
     const dailySince = startOfDayMs(nowMs, config.proactive.timezone)
-    const frequency = proactiveFrequency(config, repos, input.principalId)
+    const frequency = proactiveFrequency(config, repos, input.principalId, nowMs)
     const sentToday = repos.countOutboxSince(conversationId, dailySince)
     if (sentToday >= frequency.dailyLimit) blocked.push('daily-limit')
     const globalCount = Number(repos.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM outbox WHERE ${SPONTANEOUS_OUTBOX} AND planned_at_ms >= ? AND status IN ('pending','sending','sent','unknown')`, dailySince)?.n ?? 0)
@@ -235,7 +240,10 @@ function smallTalkCandidate(input: CandidateInput): Candidate[] {
     const { repos, conversationId, nowMs } = input
     repos.db.run("UPDATE proactive_opportunities SET status = 'expired' WHERE status = 'pending' AND expires_at_ms <= ?", nowMs)
     return repos.db.all<Record<string, unknown>>("SELECT * FROM proactive_opportunities WHERE conversation_id = ? AND status = 'pending' AND not_before_ms <= ? AND expires_at_ms > ? ORDER BY created_at_ms LIMIT 20", conversationId, nowMs, nowMs).filter(row => {
-      if (row['kind'] === 'computer_event' && !input.config.computerEvents.enabled) return false
+      if (row['kind'] === 'computer_event' && !(JSON.parse(String(row['source_ids_json'])) as string[]).some(id=>{
+        const evidence=computerEvidence(repos,id,input.principalId,conversationId,nowMs)
+        return evidence && (evidence.source==='interface'?input.config.perception.enabled:input.config.computerEvents.enabled)
+      })) return false
       const blockedSource = repos.getSetting(`proactive.blocked-kind:${input.principalId}:${String(row['kind'])}`)
       if (blockedSource && repos.getRawMessage(blockedSource)?.deletedAtMs === null) return false
       return (JSON.parse(String(row['source_ids_json'])) as string[]).every(id => {

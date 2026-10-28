@@ -31,6 +31,7 @@ export type OutboxOutcome =
     | { id: string; status: 'cancelled'; reason: string; chatId: string | null }
 
 export interface OutboxWorkerOptions {
+    beforeDelivery?:()=>Promise<void>
     config: Config
     repos: Repositories
     transport: QqTransport
@@ -84,6 +85,7 @@ export class OutboxWorker {
         if (this.running) return []
         this.running = true
         try {
+        await this.options.beforeDelivery?.()
         const rows = repos.claimOutbox(nowMs, this.options.limit ?? 5)
         const outcomes: OutboxOutcome[] = []
 
@@ -195,7 +197,7 @@ export class OutboxWorker {
         if (!isReminder) {
             const conversation = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', conversationId)
             const gates = checkGates({ config, repos, conversationId, principalId: conversation?.principal_id ?? '', nowMs })
-            const frequency = proactiveFrequency(config, repos, conversation?.principal_id ?? '')
+            const frequency = proactiveFrequency(config, repos, conversation?.principal_id ?? '', nowMs)
             const blocked = gates.blocked.filter(code => !['daily-limit', 'global-daily-limit', 'awaiting-reply'].includes(code))
             if (blocked.length) return blocked.join(',')
             const day = startOfDayMs(nowMs, config.proactive.timezone)
@@ -210,9 +212,8 @@ export class OutboxWorker {
                 const live = repos.db.get<{ status: string; expires_at_ms: number; kind: string; principal_id: string; source_ids_json: string }>('SELECT status, expires_at_ms, kind, principal_id, source_ids_json FROM proactive_opportunities WHERE id = ?', opportunity)
                 if (!live || live.status === 'cancelled' || live.expires_at_ms <= nowMs) return 'opportunity-expired'
                 if (live.kind === 'computer_event') {
-                    if (!config.computerEvents.enabled) return 'computer-events-disabled'
                     const sources = JSON.parse(live.source_ids_json) as string[]
-                    if (!sources.some(id => computerEvidence(repos, id, live.principal_id, conversationId, nowMs))) return 'computer-evidence-expired'
+                    if (!sources.some(id => {const evidence=computerEvidence(repos, id, live.principal_id, conversationId, nowMs);return evidence&&(evidence.source==='interface'?config.perception.enabled:config.computerEvents.enabled)})) return 'computer-evidence-expired'
                 }
             }
         }

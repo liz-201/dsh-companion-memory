@@ -8,8 +8,8 @@ interface Checkpoint {
 }
 export interface PortablePayload {
     format: 'dsh-companion-transfer';
-    version: 1 | 2;
-    formatVersion?: 2;
+    version: 1 | 2 | 3;
+    formatVersion?: 2 | 3;
     minReaderVersion?: string;
     id: string;
     createdAtMs: number;

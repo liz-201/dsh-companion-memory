@@ -9,6 +9,7 @@ import { PersonaContexts } from '../runtime/persona-context.js';
 import { ExpressionRuntime } from '../expression/runtime.js';
 export declare function installLocalIntegration(deps: {
     ready?: () => boolean;
+    beforeContext?: (query: string, binding: import('../domain/types.js').IdentityBinding) => Promise<void>;
     whenReady?: () => Promise<void>;
     on?: (event: string, callback: (...args: unknown[]) => unknown) => unknown;
     config: Config;
