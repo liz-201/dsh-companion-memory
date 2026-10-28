@@ -4,6 +4,8 @@ import { join, basename } from 'node:path'
 import type { Config } from '../config.js'
 import type { Database } from '../storage/database.js'
 import { Repositories } from '../storage/repositories.js'
+import { loadPanelSettings } from '../panel/settings.js'
+import { recoverCapabilityExtractions } from '../runtime/extraction-recovery.js'
 import { exportPortable, importPortable, readPortable, refreshPortableBaseline, snapshotForTransfer, stableJson, PortableImportError, type ImportReport } from '../storage/portable.js'
 import { CredentialStore, parseConnection, serializeConnection, validateConnectionFields } from './credentials.js'
 import { BaiduClient, type BaiduCredentials, type BaiduRemoteFile } from './baidu-client.js'
@@ -184,6 +186,8 @@ export class MemoryTransfer {
     const transfer = readPortable(file)
     // importPortable backs up, validates schema/owner/checksum and merges in one transaction.
     const result = importPortable(this.db, this.config, transfer.payload, transfer.checksum)
+    loadPanelSettings(new Repositories(this.db),this.config)
+    recoverCapabilityExtractions(this.repos)
     refreshPortableBaseline(this.db, transfer.payload, transfer.checksum)
     this.imported += result.alreadyImported ? 0 : 1
     this.conflicts += result.conflicts

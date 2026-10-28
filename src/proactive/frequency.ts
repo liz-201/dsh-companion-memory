@@ -1,11 +1,12 @@
 import type { Config } from '../config.js'
 import type { Repositories } from '../storage/repositories.js'
 import { PersonalityProfiles } from '../storage/personality-profiles.js'
+import { continuousAffect } from '../storage/continuous-affect.js'
 
 const clamp = (value: number): number => Math.max(0, Math.min(1, value))
 
 /** Affection and an outgoing current persona may use the explicitly configured extra budget. */
-export function proactiveFrequency(config: Config, repos: Repositories, principalId: string) {
+export function proactiveFrequency(config: Config, repos: Repositories, principalId: string, nowMs = Date.now()) {
   const state = repos.getSnapshot(principalId)?.snapshot
   const personaId = repos.getSetting(`persona.id:${principalId}`) ?? 'builtin'
   const profile = new PersonalityProfiles(repos).get(config.companion.id, personaId)
@@ -14,7 +15,9 @@ export function proactiveFrequency(config: Config, repos: Repositories, principa
   const liveliness = clamp(((state?.personality.initiative ?? traits?.initiative ?? .5) + (traits?.socialEnergy ?? .5) + (traits?.playfulness ?? .5)) / 3)
   const bond = clamp((affection - .5) / .5), outgoing = clamp((liveliness - .5) / .5)
   const grievance = clamp(state?.relationship.grievance ?? 0)
-  const boost = config.proactive.adaptiveFrequency ? bond * outgoing * (1 - grievance) : 0
+  const continuous = continuousAffect(repos,config,principalId,nowMs)
+  const desire = continuous ? 1 + .2 * continuous.drives.contact - .2 * continuous.drives.load : 1
+  const boost = config.proactive.adaptiveFrequency ? clamp(bond * outgoing * (1 - grievance) * desire) : 0
   const baseline = config.proactive.spontaneousLimitPerDay
   const ceiling = Math.max(baseline, config.proactive.adaptiveMaxDailyLimit)
   const baseGap = config.proactive.spontaneousMinGapMinutes

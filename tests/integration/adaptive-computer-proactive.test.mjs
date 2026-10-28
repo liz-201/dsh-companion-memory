@@ -13,6 +13,7 @@ import { computerEvidence } from '../../lib/proactive/computer-evidence.js'
 import { exportPortable, readPortable } from '../../lib/storage/portable.js'
 
 function character(f, affection = 1, liveliness = 1, grievance = 0) {
+  f.repos.setSetting('local.notification-state',JSON.stringify({at:f.now(),state:'accepts'}),f.now())
   const old = f.repos.getSnapshot('p')
   const state = old?.snapshot ?? initialSnapshot('p', 'balanced', f.config.affect.ruleVersion, f.now())
   state.relationship = { ...state.relationship, affection, grievance }
@@ -83,6 +84,7 @@ test('high affection cannot bypass no reply pause, busy intent, quiet hours or m
 test('computer observations become scoped, expiring candidates without inventing user messages or transferable evidence', t => {
   const f = fixture({ config: { proactive: { enabled: true }, computerEvents: { enabled: true } } })
   t.after(() => f.close())
+  f.repos.setSetting('local.notification-state',JSON.stringify({at:f.now(),state:'accepts'}),f.now())
   observeComputerEvent(f.repos, f.config, event(f, 'actual-event'), [f.binding])
   assert.equal(f.db.get('SELECT COUNT(*) AS n FROM raw_messages').n, 0)
   assert.equal(f.db.get('SELECT COUNT(*) AS n FROM memories').n, 0)
@@ -121,6 +123,7 @@ test('unrelated app/file changes stay quiet; configured companion interests can 
 test('computer event passes the real scheduler and outbox, and revoking collection between generation and delivery cancels it', async t => {
   const f = fixture({ config: { proactive: { enabled: true }, computerEvents: { enabled: true } } })
   t.after(() => f.close())
+  f.repos.setSetting('local.notification-state',JSON.stringify({at:f.now(),state:'accepts'}),f.now())
   const config = structuredClone(f.config)
   let generations = 0, sends = 0
   const scheduler = new ProactiveScheduler({ config, repos: f.repos, metrics: f.metrics, listConversations: () => [{ conversationId: 'c', principalId: 'p', grievance: 0, affection: .5, unresolvedConflict: false }],
@@ -129,7 +132,7 @@ test('computer event passes the real scheduler and outbox, and revoking collecti
   observeComputerEvent(f.repos, config, event(f, 'first'), [f.binding]); f.advance(31000)
   assert.equal((await scheduler.scan(f.now())).enqueued, 1)
   config.computerEvents.enabled = false
-  assert.equal((await worker.runOnce(f.now()))[0].reason, 'computer-events-disabled')
+  assert.equal((await worker.runOnce(f.now()))[0].reason, 'computer-evidence-expired')
   assert.equal(sends, 0)
   config.computerEvents.enabled = true
   observeComputerEvent(f.repos, config, event(f, 'second'), [f.binding]); f.advance(31000)

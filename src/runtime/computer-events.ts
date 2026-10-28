@@ -17,13 +17,14 @@ export interface ComputerEventsSettings {
 
 export interface ComputerEvent {
   id: string
-  kind: 'idle_return' | 'foreground_app_changed' | 'network_restored' | 'battery_low' | 'resource_pressure' | 'file_changed'
+  kind: 'idle_return' | 'foreground_app_changed' | 'network_restored' | 'battery_low' | 'resource_pressure' | 'file_changed' | 'interface_observed'
   occurredAtMs: number
   summary: string
   details: Record<string, string | number | boolean | null>
 }
 
 export interface ComputerSnapshot {
+  notificationState?: 'accepts' | 'blocked' | 'unknown'
   sampledAtMs: number
   idleSeconds: number | null
   foregroundApp: string | null
@@ -45,6 +46,7 @@ export interface ComputerEventsStatus {
 }
 
 export interface ComputerEventsOptions {
+  onSample?: (snapshot:ComputerSnapshot)=>void
   settings: () => ComputerEventsSettings
   onEvent: (event: ComputerEvent) => void
   readSnapshot?: () => Promise<ComputerSnapshot>
@@ -74,6 +76,8 @@ const WINDOWS_PROBE = [
   'using System;',
   'using System.Runtime.InteropServices;',
   'public static class DshComputerProbe {',
+  '  [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);',
+  '  public static string NotificationState() { int state; if(SHQueryUserNotificationState(out state)!=0)return "unknown";return state==5 ? "accepts" : "blocked"; }',
   '  [StructLayout(LayoutKind.Sequential)] public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }',
   '  [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);',
   '  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();',
@@ -96,7 +100,7 @@ const WINDOWS_PROBE = [
   '}',
   "'@",
   '$battery = (Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1).EstimatedChargeRemaining',
-  '@{ idle = [DshComputerProbe]::IdleSeconds(); app = [DshComputerProbe]::ForegroundProcess(); battery = $battery } | ConvertTo-Json -Compress'
+  '@{ idle = [DshComputerProbe]::IdleSeconds(); app = [DshComputerProbe]::ForegroundProcess(); battery = $battery; notification = [DshComputerProbe]::NotificationState() } | ConvertTo-Json -Compress'
 ].join('\n')
 
 function clamp(value: number, min: number, max: number, fallback: number): number {
@@ -130,7 +134,8 @@ function networkOnline(): boolean | null {
   } catch { return null }
 }
 
-function parseProbe(stdout: string): { idleSeconds: number | null; foregroundApp: string | null; batteryPercent: number | null } {
+type ProbeData = Pick<ComputerSnapshot,'idleSeconds'|'foregroundApp'|'batteryPercent'|'notificationState'>
+function parseProbe(stdout: string): ProbeData {
   const line = stdout.split(/\r?\n/).map(item => item.trim()).filter(Boolean).pop()
   if (!line) throw new Error('empty')
   const raw = JSON.parse(line) as Record<string, unknown>
@@ -138,10 +143,11 @@ function parseProbe(stdout: string): { idleSeconds: number | null; foregroundApp
   const app = typeof raw['app'] === 'string' && raw['app'].trim() ? raw['app'].trim().slice(0, 80) : null
   const batteryRaw = raw['battery']
   const battery = typeof batteryRaw === 'number' && Number.isFinite(batteryRaw) && batteryRaw >= 0 && batteryRaw <= 100 ? Math.round(batteryRaw) : null
-  return { idleSeconds: idle, foregroundApp: app, batteryPercent: battery }
+  const notificationState: NonNullable<ComputerSnapshot['notificationState']> = raw['notification']==='accepts'?'accepts':raw['notification']==='blocked'?'blocked':'unknown'
+  return { idleSeconds: idle, foregroundApp: app, batteryPercent: battery, notificationState }
 }
 
-function windowsProbe(settings: ComputerEventsSettings): Promise<{ idleSeconds: number | null; foregroundApp: string | null; batteryPercent: number | null }> {
+function windowsProbe(settings: ComputerEventsSettings): Promise<ProbeData> {
   // Flags only select fixed expressions; no path or user input is interpolated into a command.
   const script = WINDOWS_PROBE.replace('[DshComputerProbe]::ForegroundProcess()', settings.foregroundApplications ? '[DshComputerProbe]::ForegroundProcess()' : '$null')
     .replace('$battery = (Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1).EstimatedChargeRemaining', settings.resources ? '$battery = (Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue | Select-Object -First 1).EstimatedChargeRemaining' : '$battery = $null')
@@ -227,6 +233,7 @@ export interface IdleState {
 export class ComputerEvents {
   private readonly settings: () => ComputerEventsSettings
   private readonly onEvent: (event: ComputerEvent) => void
+  private readonly onSample?: (snapshot:ComputerSnapshot)=>void
   private readonly readSnapshot: () => Promise<ComputerSnapshot>
   private readonly now: () => number
   private recentEvents: ComputerEvent[] = []
@@ -246,6 +253,7 @@ export class ComputerEvents {
   constructor(options: ComputerEventsOptions) {
     this.settings = options.settings
     this.onEvent = options.onEvent
+    this.onSample = options.onSample
     this.now = options.now ?? (() => Date.now())
     this.readSnapshot = options.readSnapshot ?? (() => this.probe())
   }
@@ -311,6 +319,7 @@ export class ComputerEvents {
       const events = deriveEvents(this.lastSnapshot, snapshot, settings, this.state)
       this.lastSnapshot = snapshot
       this.lastSampleAtMs = snapshot.sampledAtMs
+      this.onSample?.(snapshot)
       for (const event of events) this.emit(event)
       return snapshot
     } catch (error) {
@@ -424,12 +433,14 @@ export class ComputerEvents {
     let idleSeconds: number | null = null
     let foregroundApp: string | null = null
     let batteryPercent: number | null = null
+    let notificationState:NonNullable<ComputerSnapshot['notificationState']>='unknown'
     if (process.platform === 'win32') {
       const result = await windowsProbe(settings)
       idleSeconds = result.idleSeconds
       foregroundApp = result.foregroundApp
       batteryPercent = result.batteryPercent
+      notificationState = result.notificationState??'unknown'
     }
-    return { sampledAtMs, idleSeconds, foregroundApp, networkOnline: online, batteryPercent, cpuPercent, memoryPercent }
+    return { sampledAtMs, idleSeconds, foregroundApp, networkOnline: online, batteryPercent, cpuPercent, memoryPercent,notificationState }
   }
 }

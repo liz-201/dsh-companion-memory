@@ -9,6 +9,7 @@ import { PersonalityProfiles } from '../storage/personality-profiles.js'
 import { guardExpression, type GuardResult } from './repair.js'
 import { estimateTokens } from '../runtime/context-budget.js'
 import { activeHabits } from '../memory/habit-learning.js'
+import { continuousAffect } from '../storage/continuous-affect.js'
 
 export class ExpressionRuntime {
   private plans = new Map<string, ExpressionPlan>()
@@ -21,6 +22,18 @@ export class ExpressionRuntime {
     const previous = this.plans.get(state.principalId)
     const exposure = this.contactExposure(state.principalId, nowMs)
     const plan = projectExpression({ state: projectSnapshot(state, nowMs, this.config.affect), userText, nowMs, contactExposure: exposure, ...(profile ? { profile } : {}), ...(previous ? { previous } : {}) })
+    const continuous = continuousAffect(this.repos,this.config,state.principalId,nowMs)
+    if (continuous) {
+      plan.continuous = continuous
+      const pad = continuous.pad.emotion
+      if (plan.mode === 'chat' && continuous.emotions.length) {
+        if (pad.pleasure < -.3 && pad.arousal > .25) plan.stance = 'firm'
+        else if (pad.pleasure < -.3) plan.stance = 'hurt'
+        else if (pad.pleasure > .3) plan.stance = 'interested'
+      }
+      if (continuous.drives.load > .7) plan.playfulness = Math.min(plan.playfulness,.3)
+      plan.reasonCodes.push('continuous-v1',...continuous.emotions.slice(0,2).map(e=>`emotion:${e.category}`))
+    }
     this.plans.set(state.principalId, plan)
     if (this.plans.size > 1000) this.plans.delete(this.plans.keys().next().value!)
     return plan

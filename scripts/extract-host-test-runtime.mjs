@@ -2,7 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 const file = process.argv[2] ?? 'D:/dsh/resources/app.asar'
-const destination = path.resolve('artifacts/desktop-v03-runtime/node_modules')
+const destination = path.resolve(process.argv[3] ?? 'artifacts/desktop-v03-runtime/node_modules')
 const fd = fs.openSync(file, 'r')
 try {
   const prefix = Buffer.alloc(16)
@@ -43,5 +43,6 @@ try {
   }
   copyPackage('@deepseek-ai/dsh-session')
   copyPackage('@deepseek-ai/dsh-llm')
+  copyPackage('@deepseek-ai/dsh-system-prompt')
   console.log(JSON.stringify({ file, destination, packages: [...copied] }))
 } finally { fs.closeSync(fd) }

@@ -144,7 +144,34 @@ export interface IntegrationConfig {
   personaPresets: Record<string, PresetId>
 }
 
+export interface EmotionConfig {
+  backgroundTimeoutMs: number
+  enabled: boolean
+  mode: 'background' | 'before-reply'
+  timeoutMs: number
+  contactTauHours: number
+  responseRelief: number
+  componentHalfLifeMinutes: number
+  moodHalfLifeMinutes: number
+}
+
+export interface PerceptionConfig {
+  enabled: boolean
+  mode: 'manual' | 'bounded-auto'
+  allowedApplications: string[]
+  uiAutomation: boolean
+  imageUnderstanding: boolean
+  allowCloudImages: boolean
+  allowHostImageStorage: boolean
+  minGapMinutes: number
+  dailyModelCalls: number
+  ttlMinutes: number
+  stableSeconds: number
+}
+
 export interface Config {
+  emotion: EmotionConfig
+  perception: PerceptionConfig
   personality: PersonalityOptions
   expression: { mode: 'enforce' | 'diagnostic'; repairMaxCallsPerTurn: number; repairMaxCallsPerDay: number; historyTurns: number; auditRetentionDays: number }
   integration: IntegrationConfig
@@ -167,6 +194,8 @@ export function dshHome(): string {
 }
 
 export const DEFAULT_CONFIG: Config = {
+  emotion: { enabled: true, mode: 'background', timeoutMs: 8000, backgroundTimeoutMs:30000,contactTauHours: 6, responseRelief: .35, componentHalfLifeMinutes: 90, moodHalfLifeMinutes: 360 },
+  perception: { enabled:false,mode:'manual',allowedApplications:[],uiAutomation:true,imageUnderstanding:true,allowCloudImages:false,allowHostImageStorage:false,minGapMinutes:5,dailyModelCalls:6,ttlMinutes:15,stableSeconds:15 },
   personality: { mix: {}, overrides: {}, variation: { enabled: false, maxDelta: .05, seed: null } },
   expression: { mode: 'enforce', repairMaxCallsPerTurn: 1, repairMaxCallsPerDay: 10, historyTurns: 10, auditRetentionDays: 30 },
   integration: { enabled: true, naturalExpression: true, mode: 'augment', localOwner: true, excludedAgentIds: [], contextBudgetTokens: 450, personaId: '', personaPresets: {} },
@@ -346,6 +375,7 @@ function readStringArray(obj: Record<string, unknown>, key: string, field: strin
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
     throw new ConfigError(`${field}.${key}`, '必须是字符串数组')
   }
+  if(field==='perception'&&(value.length>64||value.some(entry=>entry.length>80||/[\r\n\0]/.test(entry))))throw new ConfigError(`${field}.${key}`,'最多64个应用，每项至多80字且不可含换行')
   return (value as string[]).map((entry) => entry.trim()).filter((entry) => entry !== '')
 }
 
@@ -370,6 +400,8 @@ export function resolveConfig(raw: unknown = {}): Config {
   const personality = asRecord(root['personality'], 'personality')
   const variation = asRecord(personality['variation'], 'personality.variation')
   const expression = asRecord(root['expression'], 'expression')
+  const emotion = asRecord(root['emotion'], 'emotion')
+  const perception = asRecord(root['perception'], 'perception')
   const integration = asRecord(root['integration'], 'integration')
   const companion = asRecord(root['companion'], 'companion')
   const generation = asRecord(root['generation'], 'generation')
@@ -385,7 +417,9 @@ export function resolveConfig(raw: unknown = {}): Config {
 
   // §16.1 顶层也允许扁平写法（patch 里常直接写 generation.mode 等），
   // 这里只接受分组写法，扁平误写会被下面的「未知字段」检查抓到。
-  assertNoUnknown(root, ['personality', 'expression', 'integration', 'companion', 'generation', 'memory', 'affect', 'proactive', 'computerEvents', 'background', 'storage', 'cloud', 'observability', 'channel'], 'config')
+  assertNoUnknown(root, ['perception','emotion', 'personality', 'expression', 'integration', 'companion', 'generation', 'memory', 'affect', 'proactive', 'computerEvents', 'background', 'storage', 'cloud', 'observability', 'channel'], 'config')
+  assertNoUnknown(perception,['enabled','mode','allowedApplications','uiAutomation','imageUnderstanding','allowCloudImages','allowHostImageStorage','minGapMinutes','dailyModelCalls','ttlMinutes','stableSeconds'],'perception')
+  assertNoUnknown(emotion, ['enabled','mode','timeoutMs','backgroundTimeoutMs','contactTauHours','responseRelief','componentHalfLifeMinutes','moodHalfLifeMinutes'], 'emotion')
   assertNoUnknown(computerEvents, ['enabled', 'pollSeconds', 'idleThresholdSeconds', 'foregroundApplications', 'resources', 'network', 'watchDirectories'], 'computerEvents')
   assertNoUnknown(cloud, ['enabled', 'syncOnStartup', 'startupTimeoutSeconds', 'autoUpload', 'intervalSeconds', 'credentialFile'], 'cloud')
   assertNoUnknown(personality, ['mix', 'overrides', 'variation'], 'personality')
@@ -407,6 +441,24 @@ export function resolveConfig(raw: unknown = {}): Config {
   if (!TIME_RE.test(quietEnd)) throw new ConfigError('proactive.quietEnd', '必须是 HH:mm')
 
   const config: Config = {
+    perception: {
+      enabled:readBool(perception,'enabled','perception',false),mode:readEnum(perception,'mode','perception','manual',['manual','bounded-auto'] as const),
+      allowedApplications:readStringArray(perception,'allowedApplications','perception',[]),
+      uiAutomation:readBool(perception,'uiAutomation','perception',true),imageUnderstanding:readBool(perception,'imageUnderstanding','perception',true),
+      allowCloudImages:readBool(perception,'allowCloudImages','perception',false),allowHostImageStorage:readBool(perception,'allowHostImageStorage','perception',false),
+      minGapMinutes:readNumber(perception,'minGapMinutes','perception',5,{min:1,max:1440}),dailyModelCalls:readNumber(perception,'dailyModelCalls','perception',6,{min:0,max:100}),
+      ttlMinutes:readNumber(perception,'ttlMinutes','perception',15,{min:1,max:1440}),stableSeconds:readNumber(perception,'stableSeconds','perception',15,{min:1,max:600}),
+    },
+    emotion: {
+      enabled: readBool(emotion,'enabled','emotion',true),
+      mode: readEnum(emotion,'mode','emotion','background',['background','before-reply'] as const),
+      timeoutMs: readNumber(emotion,'timeoutMs','emotion',8000,{min:100,max:60000}),
+      backgroundTimeoutMs:readNumber(emotion,'backgroundTimeoutMs','emotion',30000,{min:1000,max:120000}),
+      contactTauHours: readNumber(emotion,'contactTauHours','emotion',6,{min:.1,max:168}),
+      responseRelief: readNumber(emotion,'responseRelief','emotion',.35,{min:0,max:1}),
+      componentHalfLifeMinutes: readNumber(emotion,'componentHalfLifeMinutes','emotion',90,{min:1,max:10080}),
+      moodHalfLifeMinutes: readNumber(emotion,'moodHalfLifeMinutes','emotion',360,{min:1,max:43200}),
+    },
     personality: personalityOptions,
     expression: {
       mode: readEnum(expression, 'mode', 'expression', integration['naturalExpression'] === false ? 'diagnostic' : 'enforce', ['enforce', 'diagnostic'] as const),
@@ -647,6 +699,8 @@ function freeze<T>(value: T): T {
 /** 脱敏后的配置快照，用于 docs/ENVIRONMENT.md 与 doctor 输出。 */
 export function redactConfig(config: Config): Record<string, Json> {
   return {
+    emotion: { ...config.emotion },
+    perception: { ...config.perception, allowedApplications:[...config.perception.allowedApplications] },
     integration: { ...config.integration },
     companion: { ...config.companion },
     generation: { ...config.generation },

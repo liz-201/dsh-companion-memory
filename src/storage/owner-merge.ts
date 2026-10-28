@@ -51,7 +51,7 @@ function counts(tables: Record<string, Row[]>, principalIds: Set<string>): Owner
 }
 
 function validatePackage(config: Config, payload: PortablePayload, checksum: string): void {
-  if (!payload || payload.format !== 'dsh-companion-transfer' || ![1, 2, 3].includes(payload.version)
+  if (!payload || payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4].includes(payload.version)
     || typeof payload.id !== 'string' || !payload.id || typeof payload.ownerId !== 'string' || !payload.ownerId
     || !payload.tables || !Array.isArray(payload.schema) || typeof checksum !== 'string' || !checksum) {
     throw new OwnerMergeInputError('记忆文件信息无效，请重新选择文件并预览。')

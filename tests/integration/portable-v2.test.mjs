@@ -21,7 +21,7 @@ test('A36 / A37 / A39: v2 keeps personality conflicts and never transfers execut
     const legacy = a.repos.getSnapshot(owner.principalId).snapshot.personality
     a.repos.enqueueOutbox({ id: 'pending', conversationId: 'c', turnId: null, candidateKey: 'pending', taskId: null, content: 'must not send', contentHash: 'hash', plannedAtMs: a.now(), expectedInboundSeq: 0 })
     const first = transfer(a, b, 'base.json')
-    assert.equal(first.read.payload.version, 2)
+    assert.equal(first.read.payload.version, 4)
     assert.equal(first.read.payload.tables.outbox.length, 0)
     const otherProfiles = new PersonalityProfiles(b.repos)
     assert.deepEqual(otherProfiles.get(a.config.companion.id, 'builtin').traits, profiles.get(a.config.companion.id, 'builtin').traits)

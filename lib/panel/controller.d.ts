@@ -5,6 +5,7 @@ import type { OwnerIdentity } from '../domain/owner-identity.js';
 import type { IdentityBinding } from '../domain/types.js';
 import { type FishCommandDeps } from '../commands/handlers.js';
 import type { ComputerEvents } from '../runtime/computer-events.js';
+import type { WindowPerception } from '../runtime/window-perception.js';
 export interface PanelControls {
     snapshot(input: {
         conversationId?: string;
@@ -13,6 +14,8 @@ export interface PanelControls {
     action(input: unknown): unknown | Promise<unknown>;
 }
 interface PanelOptions {
+    probeExtraction?: () => Promise<unknown>;
+    perception?: WindowPerception;
     config: Config;
     db: Database;
     repos: Repositories;
@@ -43,6 +46,34 @@ export declare class PluginPanel implements PanelControls {
         conversationId?: string;
         query?: string;
     }): {
+        continuous: import("../storage/continuous-affect.js").ContinuousAffectState | null;
+        emotion: import("../config.js").EmotionConfig;
+        perception: {
+            settings: import("../config.js").PerceptionConfig;
+            status: {
+                enabled: boolean;
+                mode: "manual" | "bounded-auto";
+                busy: boolean;
+                generation: number;
+                scopeRevision: string;
+                selectedWindows: import("../runtime/window-probe.js").WindowIdentity[];
+                error: string | null;
+                recent: {
+                    principalId: string;
+                    conversationId: string;
+                    id: string;
+                    observedAtMs: number;
+                    expiresAtMs: number;
+                    scopeRevision: string;
+                    generation: number;
+                    window: import("../runtime/window-probe.js").WindowIdentity;
+                    facts: import("../runtime/window-probe.js").WindowObservation["facts"];
+                    hypotheses: import("../runtime/window-perception.js").Hypothesis[];
+                    ocrError?: string | null;
+                }[];
+                hostImageStorageRequired: boolean;
+            } | null;
+        };
         runtime: unknown;
         conversations: {
             id: string;
@@ -89,6 +120,9 @@ export declare class PluginPanel implements PanelControls {
         tasks: import("../storage/database.js").Row[];
         opportunities: import("../storage/database.js").Row[];
         events: import("../storage/database.js").Row[];
+        emotionAppraisals: import("../storage/database.js").Row[];
+        modelUsage: import("../storage/database.js").Row[];
+        extractionJobs: import("../storage/database.js").Row[];
         feedback: import("../storage/database.js").Row[];
         expression: import("../storage/database.js").Row[];
         backups: import("../storage/backup.js").BackupSummary;

@@ -288,7 +288,7 @@ export function compactCheckpoint(checkpoint: string): string {
 /** §12.5 token 账本的一行记录；字段允许 unknown，绝不把未知填 0。 */
 export interface TokenLedgerEntry {
   turnId: string
-  phase: 'foreground' | 'background' | 'proactive'
+  phase: 'foreground' | 'background' | 'proactive' | 'evaluation' | 'perception'
   provider: string
   model: string
   inputTokens: number | 'unknown'
@@ -327,6 +327,8 @@ export class TokenLedger {
     foreground: TokenTotals
     background: TokenTotals
     proactive: TokenTotals
+    evaluation: TokenTotals
+    perception: TokenTotals
     unknownCount: number
   } {
     const empty = (): TokenTotals => ({
@@ -337,7 +339,7 @@ export class TokenLedger {
       cacheMissTokens: 0,
       reasoningTokens: 0,
     })
-    const totals = { foreground: empty(), background: empty(), proactive: empty() }
+    const totals = { foreground: empty(), background: empty(), proactive: empty(),evaluation:empty(),perception:empty() }
     let unknownCount = 0
     for (const entry of this.entries) {
       const bucket = totals[entry.phase]

@@ -14,6 +14,6 @@ test('new schema migrations roll back as one batch when a later migration fails'
     fs.writeFileSync(path.join(directory, '009_invalid.sql'), 'THIS IS INVALID SQL;')
     assert.throws(() => migrate(f.db, { now: f.now(), fts5: true, directory }))
     assert.equal(f.db.get("SELECT name FROM sqlite_master WHERE name = 'batch_probe'"), undefined)
-    assert.equal(f.db.get('SELECT MAX(version) AS version FROM schema_migrations').version, 7)
+    assert.equal(f.db.get('SELECT MAX(version) AS version FROM schema_migrations').version, 8)
   } finally { f.close() }
 })

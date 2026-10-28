@@ -38,7 +38,7 @@ $('disconnect').onclick=()=>run(async()=>{await request('disconnect',{});$('mess
 export function createTransferHandler(transfer: MemoryTransfer, controls?: PanelControls) {
   const token = randomUUID() + randomUUID()
   const downloads = new Map<string, string>()
-  const headers = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'" }
+  const headers = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'none'; form-action 'self'" }
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const send = (code: number, value: unknown): void => { response.writeHead(code, { ...headers, 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(value)) }
     const remote = request.socket?.remoteAddress

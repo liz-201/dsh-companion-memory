@@ -23,7 +23,11 @@ import { decideStrategy, checkContinuity } from '../domain/interaction-policy.js
 import { checkEligibility, isRepairIntent } from '../domain/event-policy.js'
 import { initialSnapshot, projectSnapshot, reduce } from '../domain/affect-reducer.js'
 import { personalityPreset } from '../domain/personality.js'
-import { dailyUsage } from '../domain/affect-projector.js'
+import { dailyUsage, rebuildAffect } from '../domain/affect-projector.js'
+import { saveEmotionAppraisals, priorExpectations, priorBehaviors } from '../storage/continuous-affect.js'
+import { EMOTION_CONTRACT, parseObservation } from './emotion-observation.js'
+import { perceptionContext } from './perception-context.js'
+import type { EmotionAppraisal } from '../domain/emotion-appraisal.js'
 import { emptyDelta, transition, worthMentioning } from '../domain/episode-manager.js'
 import { looksLikeReminderRequest, parseWhen } from '../domain/time-parse.js'
 import { systemClock, type Clock, type DeliveryReceipt, type EpisodeRecord, type IdentityBinding, type RawMessage, type RelationshipDelta, type ValidatedAppraisal } from '../domain/types.js'
@@ -51,6 +55,7 @@ import { observeOpportunity } from '../proactive/opportunity.js'
 import { observeFeedback } from '../proactive/feedback.js'
 
 export interface ModelCallRequest {
+  images?: {data:string;mediaType:'image/png'}[]
   turnId: string
   /** 已装配好的完整输入（人格 + 状。+ 记忆 + 正文）。*/
   systemText: string
@@ -120,6 +125,7 @@ export interface TurnOutcome {
 }
 
 export interface TurnCoordinatorDeps {
+  beforeContext?:(query:string,binding:IdentityBinding)=>Promise<void>
   config: Config
   repos: Repositories
   retriever: Retriever
@@ -150,6 +156,7 @@ export class TurnCoordinator {
   private readonly clock: Clock
   private readonly counter: TokenCounter
   private readonly expression: ExpressionRuntime
+  private readonly observations = new Map<string,Promise<void>>()
 
   constructor(private readonly deps: TurnCoordinatorDeps) {
     this.clock = deps.clock ?? systemClock
@@ -158,7 +165,7 @@ export class TurnCoordinator {
   }
 
   recordObservationUsage(turnId: string, attempt: number, usage: ModelChunk['usage']): void {
-    const entry = { turnId, phase: 'background' as const, provider: usage?.provider ?? 'host', model: usage?.model ?? 'host-default',
+    const entry = { turnId, phase: turnId.startsWith('before-reply:')?'evaluation' as const:'background' as const, provider: usage?.provider ?? 'host', model: usage?.model ?? 'host-default',
       inputTokens: usage?.inputTokens ?? 'unknown' as const, outputTokens: usage?.outputTokens ?? 'unknown' as const,
       cacheHitTokens: usage?.cacheHitTokens ?? 'unknown' as const, cacheMissTokens: usage?.cacheMissTokens ?? 'unknown' as const,
       reasoningTokens: usage?.reasoningTokens ?? 'unknown' as const, retry: attempt - 1, atMs: this.clock.now() }
@@ -166,14 +173,66 @@ export class TurnCoordinator {
     if (this.deps.repos.db.isOpen) this.deps.repos.audit({ principalId: null, kind: 'model-usage', entityId: turnId, payload: entry, createdAtMs: entry.atMs })
   }
 
+  /** One bounded extraction shared by pre-reply evaluation and the durable retry queue. */
+  requestObservation(binding:IdentityBinding,message:RawMessage,id=`observation:${message.id}`,attempt=1,previousError?:string,options:{callModel?:ModelCaller;active?:()=>boolean}={}):Promise<void> {
+    const deps=this.deps,key=`emotion.observed:${message.id}`,signature=hashKey(message.content)
+    if(deps.repos.getSetting(key)===signature)return Promise.resolve()
+    const existing=this.observations.get(message.id)
+    if(existing)return existing
+    const controller=new AbortController()
+    let timer:ReturnType<typeof setTimeout>,usage:ModelChunk['usage']
+    const execute=async():Promise<void>=>{
+      let output=''
+      const systemText=deps.prompts.protocol()+'\n'+EMOTION_CONTRACT
+      const input={outputContract:'<observation>{"v":2,"legacy":{"v":1,"e":[]},"appraisals":[]}</observation>',userMessage:message.content.slice(0,8000),priorExpectations:priorExpectations(deps.repos,binding.principalId,message.occurredAtMs),priorBehaviors:priorBehaviors(deps.repos,binding.principalId,message),...(previousError?{correction:previousError.slice(0,700)}:{})}
+      while(input.userMessage.length>100&&this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens)input.userMessage=input.userMessage.slice(0,Math.floor(input.userMessage.length*.8))
+      while(this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens&&(input.priorBehaviors.length||input.priorExpectations.length)){
+        if(input.priorBehaviors.length)input.priorBehaviors.pop();else input.priorExpectations.pop()
+      }
+      const userText=JSON.stringify(input)
+      if(this.counter.count(systemText)+this.counter.count(userText)+16>deps.config.memory.inputHardLimitTokens)throw Error('Observation input budget exceeded')
+      for await(const chunk of (options.callModel??deps.callModel)({turnId:id,thinking:'disabled',signal:controller.signal,systemText,userText})){
+        if(controller.signal.aborted)throw Error('Observation timed out')
+        output+=chunk.text;if(chunk.usage)usage=chunk.usage
+        if(output.length>16000)throw Error('Observation output too large')
+      }
+      const current=deps.repos.db.isOpen?deps.repos.getRawMessage(message.id):null
+      if(controller.signal.aborted||options.active?.()===false||!current||current.deletedAtMs!==null||current.content!==message.content)return
+      const parsed=parseObservation(output)
+      await this.observe(binding,current,parsed.legacy,{...(parsed.appraisals?{appraisals:parsed.appraisals}:{}),skipLegacy:message.sourceKind==='qq'})
+      if(!controller.signal.aborted)deps.repos.setSetting(key,signature,this.clock.now())
+    }
+    const timeoutMs=id.startsWith('before-reply:')?deps.config.emotion.timeoutMs:deps.config.emotion.backgroundTimeoutMs
+    const promise=Promise.race([execute(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('Observation timed out'))},timeoutMs)})])
+      .finally(()=>{clearTimeout(timer);this.observations.delete(message.id);this.recordObservationUsage(id,attempt,usage)})
+    this.observations.set(message.id,promise)
+    return promise
+  }
+
+  async observeBeforeReply(binding:IdentityBinding,message:RawMessage):Promise<void>{
+    if(!this.deps.config.emotion.enabled||this.deps.config.emotion.mode!=='before-reply')return
+    let timer:ReturnType<typeof setTimeout>
+    try{await Promise.race([this.requestObservation(binding,message,`before-reply:${message.id}`),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error('Pre-evaluation wait expired')),this.deps.config.emotion.timeoutMs)})])}catch{
+      this.deps.metrics.count('emotion.before-reply-pending',1)
+    }finally{clearTimeout(timer!)}
+  }
+
   /** Apply background observations to a persisted host message without generating a second reply. */
   async observe(binding: IdentityBinding, message: RawMessage, payload: EvtPayload,
-    options: { producer?: 'background_observer' | 'local_rule' } = {}): Promise<void> {
-    if (message.role !== 'user' || this.deps.repos.getRawMessage(message.id)?.deletedAtMs !== null) return
+    options: { producer?: 'background_observer' | 'local_rule'; appraisals?: EmotionAppraisal[]; skipLegacy?: boolean } = {}): Promise<void> {
+    if (message.role !== 'user' || this.deps.repos.getRawMessage(message.id)?.deletedAtMs !== null || this.deps.repos.getRawMessage(message.id)?.content!==message.content) return
     const now = this.clock.now()
     const turnId = `observe:${message.id}`
     const previousTurn = this.deps.repos.getTurn(turnId)
+    if (options.appraisals !== undefined) saveEmotionAppraisals(this.deps.repos,binding,message,options.appraisals)
     if (previousTurn?.status === 'completed') return
+    if (options.producer !== 'local_rule' && this.deps.repos.db.get("SELECT id FROM appraisals WHERE source_message_id=? AND producer='local_rule' LIMIT 1",message.id)) {
+      this.deps.repos.db.transaction(() => {
+        const retracted = this.deps.repos.db.run("UPDATE affect_events SET status='retracted' WHERE principal_id=? AND status='active' AND appraisal_id IN (SELECT id FROM appraisals WHERE source_message_id=? AND producer='local_rule')",binding.principalId,message.id).changes
+        this.deps.repos.db.run("UPDATE appraisals SET status='retracted' WHERE source_message_id=? AND producer='local_rule'",message.id)
+        if (retracted) { const current=this.deps.repos.getSnapshot(binding.principalId);this.deps.repos.putSnapshot(rebuildAffect(this.deps.repos,this.deps.config,binding.principalId,now),current?.revision??0) }
+      })
+    }
     if (!previousTurn) this.deps.repos.createTurn({ id: turnId, conversation_id: message.conversationId,
       session_id: binding.conversationId, inbound_message_id: message.id, state_revision_used: null,
       status: 'running', started_at_ms: now })
@@ -183,7 +242,7 @@ export class TurnCoordinator {
     await this.applyEvt(turnId, binding, {
       binding, chatId: '', text: message.content, platformMessageKey: message.platformMessageKey,
       occurredAtMs: message.occurredAtMs, observedAtMs: now, sessionId: binding.conversationId,
-    }, message, { ...payload, e: previousTurn?.status === 'fallback' ? [] : payload.e, t: [] }, snapshot, problems,
+    }, message, { ...payload, e: options.skipLegacy ? [] : payload.e, t: [] }, snapshot, problems,
       options.producer ?? 'background_observer')
     if (problems.some(problem => /^(evt-apply-failed|memory-write-failed)/.test(problem))) {
       this.deps.repos.updateTurn(turnId, { status: 'failed', tail_status: 'rejected', ended_at_ms: now })
@@ -240,6 +299,7 @@ export class TurnCoordinator {
       if (!inserted.inserted) {
         return { ...base, status: 'skipped', problems: ['duplicate-inbound'], durationMs: this.clock.now() - startedAt }
       }
+      if(message.sourceKind==='qq'&&binding.visibility==='private')this.deps.background?.enqueue('extract',{messageId:message.id},{dedupKey:`observe:${message.id}`,principalId:binding.principalId,availableAtMs:startedAt+1000,nowMs:startedAt})
     } catch (error) {
       return { ...base, status: 'failed', error: describeError(error), durationMs: this.clock.now() - startedAt }
     }
@@ -269,6 +329,8 @@ export class TurnCoordinator {
     const deps = this.deps
     const now = this.clock.now()
     const binding = inbound.binding
+    await this.observeBeforeReply(binding,message)
+    await deps.beforeContext?.(message.content,binding)
     learnExplicitHabit(deps.repos, binding, message)
     observeFeedback(deps.repos, binding, message)
     observeOpportunity(deps.repos, binding, message)
@@ -336,7 +398,7 @@ export class TurnCoordinator {
       const prompts = deps.prompts.load(personalityPreset(deps.repos, deps.config, binding.principalId))
       const built = buildContext({ persona: prompts.persona, protocol: prompts.protocol, boundaries, snapshot, recent,
         userText: inbound.text, strategy: [deps.config.expression.mode === 'enforce' ? CORE_POLICY : '', `【本轮倾向】${strategy.prior}`, deps.config.integration.naturalExpression ? renderPlan(this.expression.plan(snapshot, inbound.text, now)) : '',
-          deps.config.integration.naturalExpression ? renderInteractionHabits(deps.repos, binding, now) : ''].filter(Boolean).join('\n'),
+          deps.config.integration.naturalExpression ? renderInteractionHabits(deps.repos, binding, now) : '',perceptionContext(deps.repos,deps.config,binding,inbound.text,now)].filter(Boolean).join('\n'),
         memoryItems: retrieval.selected, checkpoint: renderCheckpoint(parseCheckpoint(deps.repos.currentCheckpoint(conversationId)?.['summary_json'])),
         counter: this.counter, memoryConfig: deps.config.memory })
       budget = describeBudget(built)
@@ -455,9 +517,11 @@ export class TurnCoordinator {
         },
         deps.config.affect,
       )
-      const idempotencyKey = `${message.id}:${event.k}:${event.to}:${index}`
+      const localRevision=deps.repos.db.get<{n:number|null}>("SELECT MAX(revision) n FROM appraisals WHERE source_message_id=? AND producer='local_rule'",message.id)?.n
+      const upgrade = producer === 'background_observer' && localRevision!==null && localRevision!==undefined ? ':background-upgrade' : ''
+      const idempotencyKey = `${message.id}:${event.k}:${event.to}:${index}${upgrade}`
       const appraisalId = `ap_${hashKey(idempotencyKey)}`
-      deps.repos.insertAppraisal({ id: appraisalId, sourceMessageId: message.id, revision: index,
+      deps.repos.insertAppraisal({ id: appraisalId, sourceMessageId: message.id, revision: upgrade ? localRevision!+1+index : index,
         kind: event.k, intent: event.i, target: event.to, severity: event.s, confidence: event.c,
         evidenceQuote: appraisal.evidenceQuote ?? null, producer,
         status: eligibility.eligible || eligibility.softMoodOnly ? 'active' : 'pending', createdAtMs: now })

@@ -112,7 +112,7 @@ export declare function compactCheckpoint(checkpoint: string): string;
 /** §12.5 token 账本的一行记录；字段允许 unknown，绝不把未知填 0。 */
 export interface TokenLedgerEntry {
     turnId: string;
-    phase: 'foreground' | 'background' | 'proactive';
+    phase: 'foreground' | 'background' | 'proactive' | 'evaluation' | 'perception';
     provider: string;
     model: string;
     inputTokens: number | 'unknown';
@@ -141,6 +141,8 @@ export declare class TokenLedger {
         foreground: TokenTotals;
         background: TokenTotals;
         proactive: TokenTotals;
+        evaluation: TokenTotals;
+        perception: TokenTotals;
         unknownCount: number;
     };
 }
