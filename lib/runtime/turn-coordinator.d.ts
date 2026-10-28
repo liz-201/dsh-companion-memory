@@ -120,6 +120,8 @@ export declare class TurnCoordinator {
     private readonly counter;
     private readonly expression;
     private readonly observations;
+    private readonly strategyObservations;
+    get activeObservations(): number;
     constructor(deps: TurnCoordinatorDeps);
     recordObservationUsage(turnId: string, attempt: number, usage: ModelChunk['usage']): void;
     /** One bounded extraction shared by pre-reply evaluation and the durable retry queue. */

@@ -10,6 +10,8 @@ import { guardExpression, type GuardResult } from './repair.js'
 import { estimateTokens } from '../runtime/context-budget.js'
 import { activeHabits } from '../memory/habit-learning.js'
 import { continuousAffect } from '../storage/continuous-affect.js'
+import { humanSourceSql } from '../memory/source-policy.js'
+import { continuousMood } from '../domain/continuous-mood.js'
 
 export class ExpressionRuntime {
   private plans = new Map<string, ExpressionPlan>()
@@ -21,15 +23,17 @@ export class ExpressionRuntime {
     const profile = new PersonalityProfiles(this.repos).get(this.config.companion.id, personaId)
     const previous = this.plans.get(state.principalId)
     const exposure = this.contactExposure(state.principalId, nowMs)
-    const plan = projectExpression({ state: projectSnapshot(state, nowMs, this.config.affect), userText, nowMs, contactExposure: exposure, ...(profile ? { profile } : {}), ...(previous ? { previous } : {}) })
     const continuous = continuousAffect(this.repos,this.config,state.principalId,nowMs)
+    const projected = projectSnapshot(state, nowMs, this.config.affect)
+    const plan = projectExpression({ state: {...projected,mood:continuousMood(continuous,projected.mood)}, userText, nowMs, contactExposure: exposure, ...(profile ? { profile } : {}), ...(previous ? { previous } : {}) })
     if (continuous) {
       plan.continuous = continuous
-      const pad = continuous.pad.emotion
       if (plan.mode === 'chat' && continuous.emotions.length) {
-        if (pad.pleasure < -.3 && pad.arousal > .25) plan.stance = 'firm'
-        else if (pad.pleasure < -.3) plan.stance = 'hurt'
-        else if (pad.pleasure > .3) plan.stance = 'interested'
+        const strongest = continuous.emotions[0]!
+        if (strongest.intensity >= .3 && ['anger','reproach'].includes(strongest.category)) plan.stance = 'firm'
+        else if (strongest.intensity >= .3 && ['fear','fears-confirmed','distress','pity'].includes(strongest.category)) plan.stance = 'supportive'
+        else if (strongest.intensity >= .3 && ['disappointment','shame','remorse'].includes(strongest.category)) plan.stance = 'hurt'
+        else if (continuous.pad.emotion.pleasure > .3) plan.stance = 'interested'
       }
       if (continuous.drives.load > .7) plan.playfulness = Math.min(plan.playfulness,.3)
       plan.reasonCodes.push('continuous-v1',...continuous.emotions.slice(0,2).map(e=>`emotion:${e.category}`))
@@ -43,7 +47,7 @@ export class ExpressionRuntime {
     const deletionVersion = Number(this.repos.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM deletion_tombstones WHERE principal_id = ?', principalId)?.n ?? 0)
     let cache = this.exposure.get(principalId)
     if (!cache || cache.deletionVersion !== deletionVersion) cache = { messages: 0, days: new Set(), seq: 0, deletionVersion }
-    const rows = this.repos.db.all<{ day: number; n: number; seq: number }>("SELECT CAST(r.observed_at_ms / 86400000 AS INTEGER) AS day, COUNT(*) AS n, MAX(r.seq) AS seq FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE c.principal_id = ? AND r.role = 'user' AND r.deleted_at_ms IS NULL AND r.observed_at_ms <= ? AND r.seq > ? GROUP BY day", principalId, nowMs, cache.seq)
+    const rows = this.repos.db.all<{ day: number; n: number; seq: number }>(`SELECT CAST(r.observed_at_ms / 86400000 AS INTEGER) AS day, COUNT(*) AS n, MAX(r.seq) AS seq FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE c.principal_id = ? AND ${humanSourceSql('r')} AND r.observed_at_ms <= ? AND r.seq > ? GROUP BY day`, principalId, nowMs, cache.seq)
     for (const row of rows) { cache.messages += row.n; cache.days.add(row.day); cache.seq = Math.max(cache.seq, row.seq) }
     this.exposure.set(principalId, cache)
     if (this.exposure.size > 1000) this.exposure.delete(this.exposure.keys().next().value!)

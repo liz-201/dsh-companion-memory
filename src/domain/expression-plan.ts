@@ -3,7 +3,7 @@ import { expressionProfile } from './expression-style.js'
 import { NEUTRAL, type PersonalityProfile } from './personality-profile.js'
 import { taskMode, type TaskMode } from '../expression/task-mode.js'
 import { turnCue } from './appraisal-context.js'
-import type { ContinuousAffectState } from '../storage/continuous-affect.js'
+import type { ContinuousAffectState } from './continuous-affect.js'
 
 export interface ExpressionPlan {
   continuous?: ContinuousAffectState

@@ -10,6 +10,7 @@ import { hostService } from './adapters/host-service.js'
 import { ComputerEvents } from './runtime/computer-events.js'
 import { WindowPerception } from './runtime/window-perception.js'
 import { continuousAffect } from './storage/continuous-affect.js'
+import { repairBridgeAffect } from './runtime/repair-bridge-affect.js'
 import { EMOTION_CONTRACT,parseObservation } from './runtime/emotion-observation.js'
 import { matchSourceQuote } from './memory/quote-match.js'
 import { observeComputerEvent } from './proactive/computer-opportunities.js'
@@ -137,7 +138,7 @@ export interface CompanionService {
   consumed(turnId: string): boolean
   shutdown(): Promise<void>
 }
-const VERSION = '0.3.0-dev.9'
+const VERSION = '0.3.0-dev.10'
 function logger(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
 const prefix = '[companion]'
 if (level === 'error')
@@ -178,6 +179,7 @@ for (const row of db.all<{ key: string }>("SELECT key FROM plugin_settings WHERE
 }
 const device = registerDevice(repos)
 const owner = new OwnerIdentity(repos, config, Date.now(), device.id)
+repairBridgeAffect(repos,config,Date.now())
 const transfer = new MemoryTransfer(db, config, device.id, { assertMergeIdle: () => {
   const conversations = queue.stats()
   if (conversations.running || conversations.pending || background.stats().activeLeases || desktop.list().some(item => desktop.isBusy(item.conversationId))) throw new OwnerMergeInputError('请先等待所有对话和后台整理完成，再重新预览并合并记忆。')
@@ -186,6 +188,10 @@ let panel: PluginPanel | undefined
 const transferHandler = createTransferHandler(transfer, {
   snapshot: input => panel?.snapshot(input) ?? { ready: false },
   action: input => { if (!panel) throw Error('控制台正在启动。'); return panel.action(input) },
+}, {
+  status: () => closeoutStatus(),
+  pause: () => pauseForCloseout(),
+  resume: () => resumeAfterCloseout(),
 })
 const manageUrl = (): string => {
   const web = hostService(ctx, 'webServer') as { getOrigin?: () => string } | undefined
@@ -197,8 +203,8 @@ if (repos.db.run('INSERT OR IGNORE INTO proactive_ownership VALUES (?, ?, ?, ?, 
 const desktop = new DesktopDelivery(repos)
 repos.db.run("DELETE FROM plugin_settings WHERE key='local.notification-state'")
 const computer = new ComputerEvents({ settings: () => config.computerEvents.enabled ? config.computerEvents : { ...config.computerEvents, enabled:config.perception.enabled, foregroundApplications:false,network:false,resources:false,watchDirectories:[] },
-onSample:snapshot=>{if(active)repos.setSetting('local.notification-state',JSON.stringify({at:snapshot.sampledAtMs,state:snapshot.notificationState??'unknown'}),snapshot.sampledAtMs)}, onEvent: event => {
-  if (!active || !transfer.isReady) return
+onSample:snapshot=>{if(active&&!quiescing)repos.setSetting('local.notification-state',JSON.stringify({at:snapshot.sampledAtMs,state:snapshot.notificationState??'unknown'}),snapshot.sampledAtMs)}, onEvent: event => {
+  if (!active || quiescing || !transfer.isReady) return
   try { observeComputerEvent(repos, config, event, desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean)) } catch { logger('warn', '电脑事件线索处理未完成。') }
 } })
 const personas = new PersonaContexts(repos, config)
@@ -218,7 +224,7 @@ const expression = new ExpressionRuntime(repos, config, modelCaller.call)
 const perception = new WindowPerception({config,repos,callModel:modelCaller.call,
   onUsage:(turnId,usage)=>ledger.record({turnId,phase:'perception',provider:usage?.provider??'host',model:usage?.model??'host-default',inputTokens:usage?.inputTokens??'unknown',outputTokens:usage?.outputTokens??'unknown',cacheHitTokens:usage?.cacheHitTokens??'unknown',cacheMissTokens:usage?.cacheMissTokens??'unknown',reasoningTokens:usage?.reasoningTokens??'unknown',retry:0,atMs:Date.now()}),
   binding:()=>desktop.list().map(item=>desktop.binding(item.conversationId)).find(Boolean)??null,
-  onEvent:(event,binding)=>{if(active&&transfer.isReady)observeComputerEvent(repos,config,event,[binding])},
+  onEvent:(event,binding)=>{if(active&&!quiescing&&transfer.isReady)observeComputerEvent(repos,config,event,[binding])},
 })
 const shareSources = new ShareSources(repos, config)
 const queue = new ConversationQueue({
@@ -300,8 +306,8 @@ if (/<\/?(?:say|evt)\b/.test(text)) {
 return text === '' ? null : text  }
 const scheduler = new ProactiveScheduler({
     config,    repos,    metrics,
-beforeScan: async nowMs => {await perception.revalidate();await shareSources.scan(desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean), nowMs)},
-listConversations: () =>      [...chatByConversation.entries()].filter(([id, chatId]) => !id.startsWith('review:') && (!chatId.startsWith('desktop:') || desktop.has(id))).map(([conversationId, chatId]) => {
+beforeScan: async nowMs => {if(quiescing)return;await perception.revalidate();if(!quiescing)await shareSources.scan(desktop.list().map(item => desktop.binding(item.conversationId)!).filter(Boolean), nowMs)},
+listConversations: () =>      (quiescing?[]:[...chatByConversation.entries()]).filter(([id, chatId]) => !id.startsWith('review:') && (!chatId.startsWith('desktop:') || desktop.has(id))).map(([conversationId, chatId]) => {
 const binding = bindingForConversation(conversationId, chatId)
 const stored = binding === null ? null : repos.getSnapshot(binding.principalId)
         return {
@@ -419,9 +425,30 @@ label: config.companion.id,      }
 pruneBackups(      backupDirectory(db.file),      config.storage.backupRetentionDays,      Date.now(),    )  })
 // ── 服务 ────────────────────────────────────────────────────────────────────
 let active = true
+let quiescing = false
+let closeoutDrained = false
+const closeoutStatus = () => ({paused:quiescing,drained:quiescing&&closeoutDrained&&background.stats().activeLeases===0&&coordinator.activeObservations===0&&!scheduler.busy&&!outbox.busy&&!extractionProbeRunning,
+  activeLeases:background.stats().activeLeases+coordinator.activeObservations+Number(scheduler.busy)+Number(outbox.busy),
+  foreground:queue.stats().running+Number(extractionProbeRunning)+desktop.list().filter(item=>desktop.isBusy(item.conversationId)).length,pending:queue.stats().pending})
+const pauseForCloseout = async () => {
+  const current=closeoutStatus()
+  if (current.foreground || current.pending) throw Error('Foreground work is still running')
+  quiescing=true;closeoutDrained=false
+  scheduler.stop();computer.stop();perception.stop();background.stop()
+  const deadline=Date.now()+30000
+  await background.drain(30000)
+  while ((coordinator.activeObservations||scheduler.busy||outbox.busy) && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,25))
+  closeoutDrained=!background.stats().activeLeases&&!coordinator.activeObservations&&!scheduler.busy&&!outbox.busy
+  return closeoutStatus()
+}
+const resumeAfterCloseout = () => {
+  quiescing=false;closeoutDrained=false
+  if(active&&transfer.isReady){background.start();scheduler.start();computer.start();perception.configure()}
+  return closeoutStatus()
+}
 const service: CompanionService = {
 version: VERSION,
-accepts(chatId) { return active && decideActivation(config.companion, config.channel, chatId).active },
+accepts(chatId) { return active && !quiescing && decideActivation(config.companion, config.channel, chatId).active },
 async handleInbound(input) {
   await transfer.ready
   if (!service.accepts(input.chatId) || config.generation.mode === 'plain') return { handled: false, replySuppressed: false, outcome: null, reason: 'scope-disabled' }
@@ -528,7 +555,7 @@ const localDisposer = installLocalIntegration({
   beforeContext:(query,binding)=>perception.prepareContext(query,binding),
   ...(ctx.on ? { on: ctx.on.bind(ctx) } : {}), config, owner, repos, retriever, background, coordinator,
   ready: () => transfer.isReady, whenReady: () => transfer.ready,
-  callModel: modelCaller.call, prompts, deviceText: device.text, active: () => active, personas,
+  callModel: modelCaller.call, prompts, deviceText: device.text, active: () => active&&!quiescing, personas,
   expression,
   busy: (id, value) => desktop.setBusy(id, value),
   disposed: id => desktop.remove(id),
@@ -542,6 +569,7 @@ const localDisposer = installLocalIntegration({
   } } : {}),
 })
 const publish = (): boolean => {
+  if(quiescing)return false
   try { sync.publish(device.id); return true } catch (error) { logger('warn', `记忆同步文件写入失败：${String(error)}`); return false }
 }
 publish()
@@ -556,6 +584,7 @@ input: {
  hint: 'status | mood | why | memory <关键词> | remember <内容> | forget <id> --confirm' }
 ,
 handler: (input) => {
+if(quiescing)return {kind:'error',text:'记忆正在收尾同步，已暂停新操作。'}
 const rawInput = typeof input.rawInput === 'string' ? input.rawInput : ''
 const chatId = chatIdForAgent(input.agent)
 if (!chatId) {
@@ -678,9 +707,9 @@ let outboxTimer: ReturnType<typeof setInterval> | null = null
 let backupTimer: ReturnType<typeof setInterval> | null = null
 transfer.start()
 if (transfer.isReady) { background.start(); scheduler.start(); computer.start(); perception.configure() }
-else void transfer.ready.then(() => { if (active) { background.start(); scheduler.start(); computer.start(); perception.configure() } })
+else void transfer.ready.then(() => { if (active&&!quiescing) { background.start(); scheduler.start(); computer.start(); perception.configure() } })
 outboxTimer = setInterval(() => {
-if (!transfer.isReady) return
+if (!transfer.isReady || quiescing) return
 void outbox.runOnce().catch((error: unknown) => {
 logger('warn', `主动消息投递失败：${error instanceof Error ? error.message : String(error)}`)    })
 }
@@ -690,7 +719,7 @@ outboxTimer as {
  unref?: () => void }).unref?.()
 if (config.storage.backupDaily) {
 scheduleDailyBackup(config, background, Date.now())
-backupTimer = setInterval(() => { scheduleDailyBackup(config, background, Date.now()) }, 60 * 60 * 1000)    ;
+backupTimer = setInterval(() => { if(!quiescing)scheduleDailyBackup(config, background, Date.now()) }, 60 * 60 * 1000)    ;
 (
 backupTimer as {
  unref?: () => void }).unref?.()  }

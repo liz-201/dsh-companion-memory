@@ -86,6 +86,8 @@ export class ProactiveScheduler {
         return this.timer !== null
     }
 
+    get busy(): boolean { return this.scanning }
+
     /** 启动周期扫描；重复调用不会产生第二个 timer（热重载安全）。 */
     start(): void {
         if (this.timer !== null) return

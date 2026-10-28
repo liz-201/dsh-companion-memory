@@ -17,6 +17,8 @@ import { updatePanelSettings } from './settings.js'
 import { PanelInputError } from './errors.js'
 import type { WindowPerception } from '../runtime/window-perception.js'
 import { continuousAffect,retractEmotionAppraisal } from '../storage/continuous-affect.js'
+import { emotionTimeline } from '../storage/emotion-timeline.js'
+import { humanSourceSql } from '../memory/source-policy.js'
 
 export interface PanelControls { snapshot(input: { conversationId?: string; query?: string }): unknown; action(input: unknown): unknown | Promise<unknown> }
 interface PanelOptions {
@@ -58,15 +60,15 @@ export class PluginPanel implements PanelControls {
     const state = projectSnapshot(stored?.snapshot ?? initialSnapshot(principalId, config.companion.preset, config.affect.ruleVersion, now), now, config.affect)
     const profile = new PersonalityProfiles(repos).get(config.companion.id, selected?.personaId ?? 'builtin')
     const query = (input.query ?? '').slice(0, 200).toLowerCase()
-    return { continuous: continuousAffect(repos,config,principalId,now), emotion: config.emotion, perception: {settings:config.perception,status:this.options.perception?.status()??null}, runtime: this.options.status(), conversations: conversations.map(row => ({ id: row.id, personaId: row.personaId, label: `${row.personaId} · ${row.platform_conversation_id.slice(-60)}`, available: row.available })), selected: conversationId, state, profile, frequency: proactiveFrequency(config, repos, principalId), gates: checkGates({ config, repos, principalId, conversationId, nowMs: now }), proactive: { ...config.proactive, modelInterests: companionInterests(repos, config, principalId), enabled: (repos.getSetting('proactive.enabled') ?? (config.proactive.enabled ? '1' : '0')) === '1' }, computer: { settings: config.computerEvents, status: computer.status(), recent: computer.recent() },
+    return { continuous: continuousAffect(repos,config,principalId,now), emotionTimeline: emotionTimeline(repos,config,principalId,now), emotion: config.emotion, perception: {settings:config.perception,status:this.options.perception?.status()??null}, runtime: this.options.status(), conversations: conversations.map(row => ({ id: row.id, personaId: row.personaId, label: `${row.personaId} · ${row.platform_conversation_id.slice(-60)}`, available: row.available })), selected: conversationId, state, profile, frequency: proactiveFrequency(config, repos, principalId), gates: checkGates({ config, repos, principalId, conversationId, nowMs: now }), proactive: { ...config.proactive, modelInterests: companionInterests(repos, config, principalId), enabled: (repos.getSetting('proactive.enabled') ?? (config.proactive.enabled ? '1' : '0')) === '1' }, computer: { settings: config.computerEvents, status: computer.status(), recent: computer.recent() },
       memories: repos.activeMemories(principalId, ['episode', 'fact', 'preference', 'interaction_rule', 'hypothesis'], 200).filter(row => row.visibility === 'private' && (!query || row.claim.toLowerCase().includes(query))).slice(0, 100),
       habits: db.all('SELECT id, kind, value_json, status FROM expression_habits WHERE principal_id = ? ORDER BY valid_from_ms DESC LIMIT 30', principalId),
       tasks: db.all('SELECT id, kind, content, status, due_at_ms FROM tasks WHERE principal_id = ? ORDER BY created_at_ms DESC LIMIT 40', principalId),
       opportunities: db.all('SELECT kind, summary, status, not_before_ms FROM proactive_opportunities WHERE principal_id = ? ORDER BY created_at_ms DESC LIMIT 20', principalId),
       events: db.all('SELECT seq, payload_json, event_time_ms, status FROM affect_events WHERE principal_id = ? ORDER BY seq DESC LIMIT 30', principalId),
-      emotionAppraisals: db.all('SELECT id,evidence_quote,vector_json,status,event_time_ms,revision FROM emotion_appraisals WHERE principal_id=? ORDER BY event_time_ms DESC LIMIT 20',principalId),
+      emotionAppraisals: db.all(`SELECT a.id,a.evidence_quote,a.vector_json,a.status,r.occurred_at_ms AS event_time_ms,a.revision FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE a.principal_id=? AND c.principal_id=? AND c.kind='private' AND a.conversation_id=r.conversation_id AND ${humanSourceSql('r')} AND r.occurred_at_ms<=? ORDER BY r.occurred_at_ms DESC,r.seq DESC,a.slot,a.id LIMIT 20`,principalId,principalId,now),
       modelUsage: db.all("SELECT kind,payload_json,created_at_ms FROM audit_events WHERE kind IN('model-usage','model-usage:perception') ORDER BY created_at_ms DESC LIMIT 12"),
-      extractionJobs: db.all("SELECT j.id,j.status,j.attempts,j.last_error FROM background_jobs j JOIN raw_messages r ON r.id=json_extract(j.payload_json,'$.messageId') JOIN conversations c ON c.id=r.conversation_id WHERE j.kind='extract' AND c.principal_id=? AND r.deleted_at_ms IS NULL ORDER BY j.created_at_ms DESC LIMIT 12",principalId),
+      extractionJobs: db.all(`SELECT j.id,j.status,j.attempts,j.last_error FROM background_jobs j JOIN raw_messages r ON r.id=json_extract(j.payload_json,'$.messageId') JOIN conversations c ON c.id=r.conversation_id WHERE j.kind='extract' AND c.principal_id=? AND ${humanSourceSql('r')} ORDER BY j.created_at_ms DESC LIMIT 12`,principalId),
       feedback: db.all('SELECT f.id, f.kind, f.evidence_quote, f.created_at_ms FROM proactive_feedback f WHERE f.principal_id = ? AND NOT EXISTS (SELECT 1 FROM proactive_feedback next WHERE next.supersedes_id = f.id) ORDER BY f.created_at_ms DESC LIMIT 20', principalId),
       expression: db.all('SELECT mode, issues_json, status, repair_calls, created_at_ms FROM expression_audits WHERE principal_id = ? ORDER BY created_at_ms DESC LIMIT 20', principalId),
       backups: backupSummary(backupDirectory(db.file)), background: this.options.background.stats() }
@@ -97,7 +99,7 @@ export class PluginPanel implements PanelControls {
     }
     if(action==='extract-retry'){
       const id=text(body['id'],500),now=Date.now()
-      const changed=db.run("UPDATE background_jobs SET status='pending',attempts=0,lease_until_ms=NULL,available_at_ms=? WHERE id=? AND kind='extract' AND status='failed' AND EXISTS(SELECT 1 FROM raw_messages r JOIN conversations c ON c.id=r.conversation_id WHERE r.id=json_extract(background_jobs.payload_json,'$.messageId') AND c.principal_id=? AND r.role='user' AND r.deleted_at_ms IS NULL)",now,id,binding.principalId).changes
+      const changed=db.run(`UPDATE background_jobs SET status='pending',attempts=0,lease_until_ms=NULL,available_at_ms=? WHERE id=? AND kind='extract' AND status='failed' AND EXISTS(SELECT 1 FROM raw_messages r JOIN conversations c ON c.id=r.conversation_id WHERE r.id=json_extract(background_jobs.payload_json,'$.messageId') AND c.principal_id=? AND ${humanSourceSql('r')})`,now,id,binding.principalId).changes
       if(!changed)throw new PanelInputError('只有当前主人未删除原文的失败抽取任务可以重试。')
       repos.audit({principalId:binding.principalId,kind:'extract.manual-retry',entityId:id,payload:{attempts:0},createdAtMs:now});this.options.background.start()
       return {text:'该抽取任务已重新排队，不会发送第二条聊天回复。'}

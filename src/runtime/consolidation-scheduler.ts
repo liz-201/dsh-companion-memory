@@ -1,6 +1,7 @@
 import type { Config } from '../config.js'
 import type { Repositories } from '../storage/repositories.js'
 import type { BackgroundQueue } from './background-queue.js'
+import { humanSourceSql } from '../memory/source-policy.js'
 
 /** One upgrade pass; terminal protocol failures are not reset every restart. */
 export function recoverConsolidationJobs(repos: Repositories, nowMs: number): number {
@@ -19,7 +20,7 @@ export function scheduleConsolidation(repos: Repositories, config: Config, backg
   if (conversationId.startsWith('review:') || config.background.consolidateEveryTurns <= 0) return false
   const cursor = Number(repos.getSetting(`consolidation.cursor:${conversationId}`) ?? 0)
   const pending = repos.db.get<{ n: number; last: number | null }>(
-    "SELECT COUNT(*) AS n, MAX(seq) AS last FROM raw_messages WHERE conversation_id = ? AND role = 'user' AND deleted_at_ms IS NULL AND seq > ?", conversationId, cursor)
+    `SELECT COUNT(*) AS n, MAX(seq) AS last FROM raw_messages WHERE conversation_id = ? AND ${humanSourceSql()} AND seq > ?`, conversationId, cursor)
   const continuing = options.throughSeq !== undefined && options.throughSeq > cursor
   if (!continuing && (pending?.n ?? 0) < config.background.consolidateEveryTurns) return false
   if (repos.db.get("SELECT id FROM background_jobs WHERE kind = 'consolidate' AND status IN ('pending', 'leased') AND json_extract(payload_json, '$.conversationId') = ? AND id <> ? LIMIT 1", conversationId, options.excludeJobId ?? '')) return false

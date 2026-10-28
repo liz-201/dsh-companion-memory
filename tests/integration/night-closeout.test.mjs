@@ -41,6 +41,7 @@ function fixture(overrides = {}) {
     inspectGit: async () => { events.push('git'); return { commit, dirty: false } },
     idle: async () => { events.push('idle'); return true },
     syncCloud: async () => { events.push('sync'); return { lastSyncAtMs: time, uploadQueued: true } },
+    verifyMemoryPaused: async () => { events.push('memory-check') },
     push: async value => { assert.equal(value, commit); events.push('push'); return commit },
     remoteHead: async () => { events.push('remote-head'); return commit },
     shutdown: async () => { events.push('shutdown') },
@@ -188,6 +189,41 @@ test('restarting a completed same-night request never resubmits shutdown', async
   assert.deepEqual(f.events, [])
 })
 
+test('a journal failure after the OS accepted shutdown preserves the attempt across restart', async () => {
+  const f = fixture()
+  const save = f.deps.save
+  let failFinalSave = true
+  f.deps.save = async value => {
+    if (value.phase === 'shutdown-requested' && failFinalSave) { failFinalSave = false; throw Error('transient final journal failure') }
+    f.data.prior = structuredClone(value)
+    await save(value)
+  }
+  const first = await runNightCloseout(f.options, f.deps)
+  assert.equal(first.phase, 'blocked')
+  assert.equal(first.error, 'NIGHT_OPERATION_FAILED')
+  assert.equal(f.events.filter(value => value === 'shutdown').length, 1)
+  assert.equal(f.data.prior.shutdownAttemptedAtMs, first.shutdownAttemptedAtMs)
+  f.events.length = 0
+  const restarted = await runNightCloseout(f.options, f.deps)
+  assert.equal(restarted.error, 'NIGHT_SHUTDOWN_OUTCOME_UNKNOWN')
+  assert.deepEqual(f.events, [])
+})
+
+test('a failed attempt reservation stays conservative instead of automatically retrying shutdown', async () => {
+  const f = fixture()
+  const save = f.deps.save
+  f.deps.save = async value => {
+    if (value.phase === 'shutdown-requesting') throw Error('reservation journal unavailable')
+    f.data.prior = structuredClone(value)
+    await save(value)
+  }
+  assert.equal((await runNightCloseout(f.options, f.deps)).phase, 'blocked')
+  assert.ok(!f.events.includes('shutdown'))
+  f.events.length = 0
+  assert.equal((await runNightCloseout(f.options, f.deps)).error, 'NIGHT_SHUTDOWN_OUTCOME_UNKNOWN')
+  assert.deepEqual(f.events, [])
+})
+
 test('an interrupted same-night stop can resume even after the quota resets, while another night cannot trigger it', async () => {
   const f = fixture()
   f.data.stop = { version: 1, runId: f.options.runId, triggeredAtMs: f.deps.now() - 100, quota: exhausted().rateLimits.primary }
@@ -213,6 +249,16 @@ test('new edits in the countdown and a failed final memory flush both prevent sh
   assert.equal((await runNightCloseout(next.options, next.deps)).error, 'NIGHT_CLOUD_SYNC_FAILED')
   assert.ok(next.events.includes('push'))
   assert.ok(!next.events.includes('shutdown'))
+})
+
+test('a resumed or no-longer-uploaded memory state after the final remote check prevents shutdown', async () => {
+  const f = fixture()
+  f.deps.verifyMemoryPaused = async () => { throw error('NIGHT_MEMORY_NOT_DRAINED') }
+  const result = await runNightCloseout(f.options, f.deps)
+  assert.equal(result.error, 'NIGHT_MEMORY_NOT_DRAINED')
+  assert.ok(f.events.includes('push'))
+  assert.ok(!f.events.includes('shutdown'))
+  assert.equal(result.shutdownAttemptedAtMs, undefined)
 })
 
 async function files(t) {
@@ -252,25 +298,64 @@ test('the live API adapter exports only with auto-upload queued and waits beyond
       assert.equal(init.headers.cookie, 'private-cookie')
       if (url.pathname.endsWith('/manage')) return new Response('<script>const token="private-action", x=1;</script>')
       assert.equal(init.headers['x-companion-token'], 'private-action')
+      if (url.pathname.endsWith('/closeout-pause') || url.pathname.endsWith('/closeout-status')) return Response.json({ paused: true, drained: true, activeLeases: 0, foreground: 0, pending: 0 })
       if (url.pathname.endsWith('/export')) return Response.json({ upload: 'queued', download: '/not-logged' })
       if (url.pathname.endsWith('/sync')) return Response.json({ busy: true })
       return Response.json({ enabled: true, connected: true, ready: true, busy: ++statuses === 1,
-        error: null, lastSyncAtMs: statuses === 1 ? time - 100 : time })
+        error: null, lastSyncAtMs: statuses === 1 ? time - 100 : time,
+        snapshotUploaded: true, localStateHash: 'a'.repeat(64), uploadedStateHash: 'a'.repeat(64) })
     },
   })
   const result = await d.syncCloud()
   assert.equal(result.uploadQueued, true)
   assert.equal(statuses, 2)
-  assert.deepEqual(paths.slice(0, 3), ['/companion-memory/manage', '/companion-memory/api/export', '/companion-memory/api/sync'])
+  assert.deepEqual(paths.slice(0, 4), ['/companion-memory/manage', '/companion-memory/api/closeout-pause', '/companion-memory/api/export', '/companion-memory/api/sync'])
+  assert.equal(paths.at(-1), '/companion-memory/api/closeout-status')
   assert.ok(!JSON.stringify(result).includes('private'))
 })
 
 test('disabled auto-upload never becomes a false successful cloud closeout', async () => {
   const d = createLiveDependencies({ cwd: '.', stateDir: '.' }, {
     connect: async () => ({ url: new URL('http://127.0.0.1:2222/'), cookie: 'cookie' }),
-    fetch: async url => url.pathname.endsWith('/manage') ? new Response('const token="action"') : Response.json({ upload: 'disabled' }),
+    fetch: async url => url.pathname.endsWith('/manage') ? new Response('const token="action"')
+      : url.pathname.endsWith('/closeout-pause') ? Response.json({ paused: true, drained: true, activeLeases: 0, foreground: 0, pending: 0 }) : Response.json({ upload: 'disabled' }),
   })
   await assert.rejects(d.syncCloud(), { code: 'NIGHT_AUTO_UPLOAD_DISABLED' })
+})
+
+test('an old plugin without closeout pause support cannot export or silently proceed to shutdown', async () => {
+  const paths = []
+  const d = createLiveDependencies({ cwd: '.', stateDir: '.' }, {
+    connect: async () => ({ url: new URL('http://127.0.0.1:2222/'), cookie: 'cookie' }),
+    fetch: async url => { paths.push(url.pathname); return url.pathname.endsWith('/manage') ? new Response('const token="action"') : Response.json({}, { status: 404 }) },
+  })
+  await assert.rejects(d.syncCloud(), { code: 'NIGHT_CLOSEOUT_UNSUPPORTED' })
+  assert.ok(!paths.some(path => path.endsWith('/export') || path.endsWith('/sync')))
+})
+
+test('undrained background work and unverified snapshot hashes cannot pass cloud closeout', async () => {
+  for (const kind of ['active', 'pending', 'resumed', 'hash-mismatch', 'no-proof']) {
+    const paths = [], state = { paused: true, drained: true, activeLeases: 0, foreground: 0, pending: 0 }
+    if (kind === 'active') state.activeLeases = 1
+    if (kind === 'pending') state.pending = 1
+    const d = createLiveDependencies({ cwd: '.', stateDir: '.' }, {
+      now: () => 1000000,
+      connect: async () => ({ url: new URL('http://127.0.0.1:2222/'), cookie: 'cookie' }),
+      fetch: async url => {
+        paths.push(url.pathname)
+        if (url.pathname.endsWith('/manage')) return new Response('const token="action"')
+        if (url.pathname.endsWith('/closeout-pause')) return Response.json(state)
+        if (url.pathname.endsWith('/closeout-status')) return Response.json({ ...state, paused: kind !== 'resumed' })
+        if (url.pathname.endsWith('/export')) return Response.json({ upload: 'queued' })
+        if (url.pathname.endsWith('/sync')) return Response.json({})
+        return Response.json({ enabled: true, connected: true, ready: true, busy: false, error: null, lastSyncAtMs: 1000000,
+          ...(kind === 'no-proof' ? {} : { snapshotUploaded: true, localStateHash: 'a'.repeat(64), uploadedStateHash: (kind === 'hash-mismatch' ? 'b' : 'a').repeat(64) }) })
+      },
+    })
+    await assert.rejects(d.syncCloud(), { code: ['active', 'pending', 'resumed'].includes(kind) ? 'NIGHT_MEMORY_NOT_DRAINED' : 'NIGHT_SNAPSHOT_NOT_UPLOADED' })
+    if (kind === 'active' || kind === 'pending') assert.ok(!paths.some(path => path.endsWith('/export')))
+    assert.ok(!paths.some(path => path.endsWith('/closeout-resume')))
+  }
 })
 
 test('the live adapter reads only account rate limits and closes the CLI client', async () => {
@@ -287,16 +372,70 @@ test('the live adapter reads only account rate limits and closes the CLI client'
 test('the git adapter pushes only the signed commit after fetching and proving remote ancestry', async t => {
   const { cwd } = await files(t)
   const calls = []
+  const repository = 'https://github.com/liz-201/dsh-companion-memory.git'
   const d = createLiveDependencies({ cwd, stateDir: cwd }, { exec: async (command, args) => {
     assert.equal(command, 'git'); calls.push(args)
-    return { stdout: args[0] === 'ls-remote' ? `${commit}\trefs/heads/main\n` : '' }
+    return { stdout: args[0] === 'remote' ? repository : args[0] === 'ls-remote' ? `${commit}\trefs/heads/main\n` : '' }
   } })
   assert.equal(await d.push(commit), commit)
   assert.deepEqual(calls, [
-    ['fetch', '--no-tags', 'origin', 'main'], ['merge-base', '--is-ancestor', 'FETCH_HEAD', commit],
-    ['push', 'origin', `${commit}:refs/heads/main`], ['ls-remote', '--exit-code', 'origin', 'refs/heads/main'],
+    ['remote', 'get-url', '--push', '--all', 'origin'], ['remote', 'get-url', '--all', 'origin'],
+    ['fetch', '--no-tags', repository, 'refs/heads/main'], ['merge-base', '--is-ancestor', 'FETCH_HEAD', commit],
+    ['push', '--no-follow-tags', repository, `${commit}:refs/heads/main`],
+    ['remote', 'get-url', '--push', '--all', 'origin'], ['remote', 'get-url', '--all', 'origin'],
+    ['ls-remote', '--exit-code', repository, 'refs/heads/main'],
   ])
   assert.ok(!JSON.stringify(calls).includes('--force'))
+})
+
+test('extra push targets or a different fetch repository are rejected before any network operation', async () => {
+  const repository = 'https://github.com/liz-201/dsh-companion-memory.git'
+  for (const configuration of [
+    { push: `${repository}\nhttps://other.invalid/mirror.git`, fetch: repository },
+    { push: repository, fetch: 'https://other.invalid/source.git' },
+    { push: repository, fetch: `${repository}\nhttps://other.invalid/source.git` },
+  ]) {
+    const calls = []
+    const d = createLiveDependencies({ cwd: '.', stateDir: '.' }, { exec: async (command, args) => {
+      assert.equal(command, 'git'); calls.push(args)
+      return { stdout: args.includes('--push') ? configuration.push : configuration.fetch }
+    } })
+    await assert.rejects(d.push(commit), { code: 'NIGHT_WRONG_REMOTE' })
+    await assert.rejects(d.remoteHead(), { code: 'NIGHT_WRONG_REMOTE' })
+    assert.ok(calls.every(args => args[0] === 'remote'))
+  }
+})
+
+test('remote verification reads the checked push target rather than the differently spelled fetch URL', async () => {
+  const push = 'git@github.com:liz-201/dsh-companion-memory.git'
+  const fetch = 'https://github.com/liz-201/dsh-companion-memory'
+  const calls = []
+  const d = createLiveDependencies({ cwd: '.', stateDir: '.' }, { exec: async (command, args) => {
+    assert.equal(command, 'git'); calls.push(args)
+    return { stdout: args[0] === 'remote' ? args.includes('--push') ? push : fetch : `${commit}\trefs/heads/main\n` }
+  } })
+  assert.equal(await d.remoteHead(), commit)
+  assert.deepEqual(calls.at(-1), ['ls-remote', '--exit-code', push, 'refs/heads/main'])
+})
+
+test('the idle adapter requires real sequenced projections and both empty durable inbox queues', async () => {
+  const auth = { sessionIds: ['session-one', 'session-two'] }
+  const item = sessionId => ({ sessionId, running: false, projections: { kind: 'sequenced', values: { inbox: { 'next-turn': [], 'next-step': [] } } } })
+  let items = auth.sessionIds.map(item)
+  const d = createLiveDependencies({ cwd: '.', stateDir: '.' }, { connect: async () => ({ list: async () => ({ items }) }) })
+  assert.equal(await d.idle(auth), true)
+  for (const changed of [
+    { ...item('session-two'), running: true },
+    { ...item('session-two'), projections: { kind: 'unknown' } },
+    { ...item('session-two'), projections: { kind: 'sequenced', values: { inbox: { 'next-turn': [] } } } },
+    { ...item('session-two'), projections: { kind: 'sequenced', values: { inbox: { 'next-turn': ['pending'], 'next-step': [] } } } },
+    { ...item('session-two'), projections: { kind: 'sequenced', values: { inbox: { 'next-turn': [], 'next-step': ['steer'] } } } },
+  ]) {
+    items = [item('session-one'), changed]
+    assert.equal(await d.idle(auth), false)
+  }
+  items = [item('session-one')]
+  assert.equal(await d.idle(auth), false)
 })
 
 test('the Windows adapter never uses a nonzero shutdown timeout or force switch', async () => {

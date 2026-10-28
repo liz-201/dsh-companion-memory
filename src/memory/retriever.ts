@@ -20,6 +20,7 @@ import type { MemoryRow, Repositories } from '../storage/repositories.js'
 import { tokensToMatchQuery } from './normalizer.js'
 import { buildQueryTerms, termWeights, type AliasDictionary } from './lexical-index.js'
 import { repairContext } from './episodic.js'
+import { detectSourceKind } from './source-policy.js'
 
 export interface RetrievalRequest {
   binding: IdentityBinding
@@ -130,6 +131,13 @@ export class Retriever {
 
     const scored: ScoredMemory[] = []
     for (const row of candidates) {
+      if (this.repos.memoryEvidence(row.id).some(evidence => {
+        const source = this.repos.getRawMessage(evidence.messageId)
+        return source && detectSourceKind(source.content,source.sourceKind)==='codex-bridge'
+      })) {
+        excluded.push({id:row.id,reason:'bridge-evidence'})
+        continue
+      }
       if (row.status !== 'active') {
         excluded.push({ id: row.id, reason: `status:${row.status}` })
         continue

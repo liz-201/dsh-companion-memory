@@ -19,6 +19,9 @@ const samePath = (a, b) => resolve(a).toLowerCase() === resolve(b).toLowerCase()
 const clock = value => Number.isSafeInteger(value) && value > 0
 const record = async file => JSON.parse(await readFile(file, 'utf8'))
 const safeFailure = error => /^NIGHT_[A-Z_]+$/.test(error?.code ?? '') ? error.code : 'NIGHT_OPERATION_FAILED'
+const drained = value => value?.paused === true && value.drained === true && value.activeLeases === 0 && value.foreground === 0 && value.pending === 0
+const snapshotUploaded = value => value?.snapshotUploaded === true && /^[a-f0-9]{64}$/.test(value.localStateHash ?? '')
+  && value.localStateHash === value.uploadedStateHash
 
 /** A failed read or an exhausted weekly/other-model bucket is never a five-hour trigger. */
 export function fiveHourLimit(result, nowMs = Date.now()) {
@@ -76,7 +79,37 @@ export function createLiveDependencies(options, io = {}) {
     try { return (await run('git', [...gitPrefix, ...args], { cwd: options.cwd, windowsHide: true, timeout: 90000, maxBuffer: 1024 * 1024 })).stdout.trim() }
     catch { fail('NIGHT_GIT_FAILED') }
   }
+  const gitTargets = async () => {
+    const push = (await git(['remote', 'get-url', '--push', '--all', 'origin'])).split(/\r?\n/).filter(Boolean)
+    const fetch = (await git(['remote', 'get-url', '--all', 'origin'])).split(/\r?\n/).filter(Boolean)
+    const allowed = new Set([REPOSITORY, 'https://github.com/liz-201/dsh-companion-memory', 'git@github.com:liz-201/dsh-companion-memory.git'])
+    // Named remotes push every pushurl but fetch only the first URL. Inspect
+    // their complete effective configuration and use the exact checked target.
+    if (push.length !== 1 || fetch.length !== 1 || !allowed.has(push[0]) || !allowed.has(fetch[0])) fail('NIGHT_WRONG_REMOTE')
+    return { push: push[0], fetch: fetch[0] }
+  }
   const connected = io.connect ?? (async () => { const client = await DshBridgeClient.discover(); await client.connect(); return client })
+  const memoryControl = async () => {
+    const client = await connected()
+    const get = (path, init = {}) => request(new URL(path, client.url), {
+      ...init, redirect: 'error', signal: AbortSignal.timeout(55000), headers: { cookie: client.cookie, ...init.headers },
+    })
+    const page = await get('/companion-memory/manage')
+    if (!page.ok) fail('NIGHT_CONTROL_UNAVAILABLE')
+    const match = /const token=("[^"\n]+")/.exec(await page.text())
+    if (!match) fail('NIGHT_CONTROL_TOKEN_MISSING')
+    return { get, headers: { 'x-companion-token': JSON.parse(match[1]), 'content-type': 'application/json' } }
+  }
+  const pausedMemory = async (control, pause = false) => {
+    const response = await control.get(`/companion-memory/api/${pause ? 'closeout-pause' : 'closeout-status'}`, {
+      headers: control.headers, ...(pause ? { method: 'POST', body: '{}' } : {}),
+    })
+    if (response.status === 404) fail('NIGHT_CLOSEOUT_UNSUPPORTED')
+    if (!response.ok) fail('NIGHT_CLOSEOUT_PAUSE_FAILED')
+    const status = await response.json()
+    if (!drained(status)) fail('NIGHT_MEMORY_NOT_DRAINED')
+    return status
+  }
   const deps = {
     now, sleep, load: name => record(join(options.stateDir, name)),
     save: createStateWriter(join(options.stateDir, 'status.json')),
@@ -113,20 +146,14 @@ export function createLiveDependencies(options, io = {}) {
     async inspectGit() {
       const cwd = await realpath(await git(['rev-parse', '--show-toplevel']))
       if (!samePath(cwd, await realpath(options.cwd))) fail('NIGHT_WRONG_WORKTREE')
-      const remote = await git(['remote', 'get-url', '--push', 'origin'])
-      if (![REPOSITORY, 'https://github.com/liz-201/dsh-companion-memory', 'git@github.com:liz-201/dsh-companion-memory.git'].includes(remote)) fail('NIGHT_WRONG_REMOTE')
+      await gitTargets()
       return { commit: await git(['rev-parse', 'HEAD']), dirty: !!await git(['status', '--porcelain=v1', '--untracked-files=all']) }
     },
     verifyEvidence,
     async syncCloud() {
-      const client = await connected()
-      const get = (path, init = {}) => request(new URL(path, client.url), {
-        ...init, redirect: 'error', signal: AbortSignal.timeout(55000), headers: { cookie: client.cookie, ...init.headers },
-      })
-      const html = await (await get('/companion-memory/manage')).text()
-      const match = /const token=("[^"\n]+")/.exec(html)
-      if (!match) fail('NIGHT_CONTROL_TOKEN_MISSING')
-      const headers = { 'x-companion-token': JSON.parse(match[1]), 'content-type': 'application/json' }
+      const control = await memoryControl()
+      await pausedMemory(control, true)
+      const { get, headers } = control
       const startedAtMs = now()
       const exported = await get('/companion-memory/api/export', { method: 'POST', headers, body: '{}' })
       if (!exported.ok || (await exported.json()).upload !== 'queued') fail('NIGHT_AUTO_UPLOAD_DISABLED')
@@ -141,22 +168,35 @@ export function createLiveDependencies(options, io = {}) {
         if (!status.busy && status.error) fail('NIGHT_CLOUD_SYNC_FAILED')
         if (status.busy === false && status.ready === true && status.error === null && Number.isSafeInteger(status.lastSyncAtMs)
           && status.lastSyncAtMs >= startedAtMs && status.lastSyncAtMs <= now() + 1000) {
+          if (!snapshotUploaded(status)) fail('NIGHT_SNAPSHOT_NOT_UPLOADED')
+          await pausedMemory(control)
           return { startedAtMs, lastSyncAtMs: status.lastSyncAtMs, uploadQueued: true, notice: !!status.notice,
-            evidence: 'MemoryTransfer.runSync verifies upload metadata and downloaded SHA256 before marking success; unchanged snapshots reuse the previously verified upload fingerprint.' }
+            localStateHash: status.localStateHash, uploadedStateHash: status.uploadedStateHash, snapshotUploaded: true, memoryPaused: true,
+            evidence: 'MemoryTransfer.runSync verifies upload metadata and downloaded SHA256; current transferable state matches that verified upload fingerprint while memory admission is paused and drained.' }
         }
         await sleep(2000)
       }
       fail('NIGHT_CLOUD_SYNC_TIMEOUT')
     },
+    async verifyMemoryPaused() {
+      const control = await memoryControl()
+      await pausedMemory(control)
+      const response = await control.get('/companion-memory/api/status', { headers: control.headers })
+      if (!response.ok) fail('NIGHT_CLOUD_STATUS_FAILED')
+      const status = await response.json()
+      if (status.busy !== false || status.error !== null || !snapshotUploaded(status)) fail('NIGHT_SNAPSHOT_NOT_UPLOADED')
+    },
     async push(commit) {
       // Fetch and ancestry check prevent replacing a newer or unrelated main.
-      await git(['fetch', '--no-tags', 'origin', 'main'])
+      const target = await gitTargets()
+      await git(['fetch', '--no-tags', target.fetch, 'refs/heads/main'])
       await git(['merge-base', '--is-ancestor', 'FETCH_HEAD', commit])
-      await git(['push', 'origin', `${commit}:refs/heads/main`])
+      await git(['push', '--no-follow-tags', target.push, `${commit}:refs/heads/main`])
       return deps.remoteHead()
     },
     async remoteHead() {
-      const value = await git(['ls-remote', '--exit-code', 'origin', 'refs/heads/main'])
+      const target = await gitTargets()
+      const value = await git(['ls-remote', '--exit-code', target.push, 'refs/heads/main'])
       return value.split(/\s+/)[0]
     },
     async shutdown() {
@@ -197,7 +237,8 @@ export async function runNightCloseout(options, deps = createLiveDependencies(op
     try {
       const prior = await deps.load('status.json')
       if (prior.runId === options.runId && prior.phase === 'shutdown-requested') return { ...prior, phase: 'already-requested' }
-      if (prior.runId === options.runId && (prior.phase === 'shutdown-requesting' || prior.error === 'NIGHT_SHUTDOWN_FAILED')) {
+      if (prior.runId === options.runId && (prior.phase === 'shutdown-requesting' || prior.error === 'NIGHT_SHUTDOWN_FAILED'
+        || Object.hasOwn(prior, 'shutdownAttemptedAtMs'))) {
         return { ...prior, phase: 'blocked', error: 'NIGHT_SHUTDOWN_OUTCOME_UNKNOWN' }
       }
     } catch {}
@@ -259,6 +300,11 @@ export async function runNightCloseout(options, deps = createLiveDependencies(op
     if (await check(trigger) !== commit) fail('NIGHT_SIGNOFF_CHANGED')
     if (await deps.remoteHead() !== commit) fail('NIGHT_REMOTE_NOT_CONFIRMED')
     await ensureAuthorized()
+    await deps.verifyMemoryPaused()
+    await ensureAuthorized()
+    // Persist the reserved attempt before calling Windows. Keep this marker in
+    // all later states, including a failure to journal an accepted OS request.
+    state.shutdownAttemptedAtMs = deps.now()
     await save('shutdown-requesting')
     await deps.shutdown()
     await save('shutdown-requested')

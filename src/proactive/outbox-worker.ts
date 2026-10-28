@@ -68,6 +68,8 @@ export class OutboxWorker {
     private readonly now: () => number
     private running = false
 
+    get busy(): boolean { return this.running }
+
     constructor(options: OutboxWorkerOptions) {
         this.options = options
         this.now = options.now ?? (() => Date.now())
@@ -205,7 +207,7 @@ export class OutboxWorker {
             if (others.filter(other => Number(other['sent_at_ms'] ?? other['planned_at_ms']) >= day).length >= frequency.dailyLimit) return 'global-daily-limit'
             const last = others[0]
             if (last && nowMs - Number(last['sent_at_ms'] ?? last['planned_at_ms']) < frequency.minGapMinutes * 60000) return 'cooldown'
-            const unresolved = repos.unresolvedOutbox(conversationId, 0).filter(other => other['id'] !== row['id'] && ['sent','unknown'].includes(String(other['status'])))
+            const unresolved = repos.unresolvedOutbox(conversationId, 0, nowMs - 24 * 3600_000).filter(other => other['id'] !== row['id'] && ['sent','unknown'].includes(String(other['status'])))
             if (unresolved.length >= config.proactive.pauseAfterUnanswered) return 'awaiting-reply'
             const opportunity = str(row, 'opportunity_id')
             if (opportunity?.startsWith('op:')) {

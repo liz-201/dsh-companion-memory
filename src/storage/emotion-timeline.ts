@@ -1,0 +1,113 @@
+import type { Config } from '../config.js'
+import type { ContinuousAffectState } from '../domain/continuous-affect.js'
+import { humanSourceSql } from '../memory/source-policy.js'
+import type { Repositories } from './repositories.js'
+import { continuousAffect } from './continuous-affect.js'
+
+const MAX_POINTS = 30
+const MAX_REVISIONS = 16
+const SOURCE_CHARACTERS = 2000
+const VECTOR_CHARACTERS = 12000
+
+export interface EmotionTimelineRevision {
+  id: string
+  revision: number
+  status: string
+  recordedAtMs: number
+  vectorJson: string
+  vectorTruncated: boolean
+}
+
+export interface EmotionTimelineAppraisal {
+  id: string
+  revision: number
+  status: string
+  evidenceQuote: string
+  vectorJson: string
+  vectorTruncated: boolean
+  revisions: EmotionTimelineRevision[]
+  revisionHistoryTotal: number
+  revisionHistoryTruncated: boolean
+}
+
+export interface EmotionTimelinePoint {
+  sourceMessageId: string
+  conversationId: string
+  sourceSeq: number
+  occurredAtMs: number
+  sourceText: string
+  sourceTextTruncated: boolean
+  sameTimeSourceCount: number
+  appraisals: EmotionTimelineAppraisal[]
+  state: ContinuousAffectState | null
+}
+
+export interface EmotionTimeline {
+  version: 'emotion-timeline-v1'
+  projection: 'current-valid-evidence'
+  sameTimeRule: 'whole-millisecond'
+  generatedAtMs: number
+  limit: number
+  hasMore: boolean
+  points: EmotionTimelinePoint[]
+}
+
+interface SourceRow { id: string; conversation_id: string; seq: number; occurred_at_ms: number; content: string }
+interface AppraisalRow { id: string; source_message_id: string; slot: number; revision: number; status: string; evidence_quote: string; vector_json: string }
+interface RevisionRow { id: string; appraisal_id: string; revision: number; status: string; vector_json: string; recorded_at_ms: number; total: number }
+
+/** A read-only explanation rebuilt from current evidence, never a stored historical snapshot. */
+export function emotionTimeline(repos: Repositories, config: Config, principalId: string, nowMs: number, requestedLimit = MAX_POINTS): EmotionTimeline {
+  if (!Number.isFinite(nowMs)) throw Error('Invalid emotion timeline time')
+  const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(MAX_POINTS, Math.trunc(requestedLimit))) : MAX_POINTS
+  const selected = repos.db.all<SourceRow>(
+    `SELECT r.id,r.conversation_id,r.seq,r.occurred_at_ms,r.content FROM raw_messages r
+     JOIN conversations c ON c.id=r.conversation_id
+     WHERE c.principal_id=? AND c.kind='private' AND ${humanSourceSql('r')} AND r.occurred_at_ms<=?
+     ORDER BY r.occurred_at_ms DESC,r.seq DESC,r.id DESC LIMIT ?`, principalId, nowMs, limit + 1)
+  const hasMore = selected.length > limit
+  const sources = selected.slice(0, limit).reverse()
+  const timeline: EmotionTimeline = { version: 'emotion-timeline-v1', projection: 'current-valid-evidence', sameTimeRule: 'whole-millisecond', generatedAtMs: nowMs, limit, hasMore, points: [] }
+  if (!sources.length) return timeline
+
+  const placeholders = sources.map(() => '?').join(',')
+  const appraisals = repos.db.all<AppraisalRow>(
+    `SELECT a.id,a.source_message_id,a.slot,a.revision,a.status,a.evidence_quote,a.vector_json FROM emotion_appraisals a
+     JOIN raw_messages r ON r.id=a.source_message_id JOIN conversations c ON c.id=r.conversation_id
+     WHERE a.principal_id=? AND c.principal_id=? AND c.kind='private' AND a.conversation_id=r.conversation_id
+       AND ${humanSourceSql('r')} AND r.id IN (${placeholders})
+     ORDER BY a.source_message_id,a.slot,a.id`, principalId, principalId, ...sources.map(row => row.id))
+  const revisions = appraisals.length ? repos.db.all<RevisionRow>(
+    `SELECT id,appraisal_id,revision,status,vector_json,recorded_at_ms,total FROM (
+       SELECT v.*,COUNT(*) OVER(PARTITION BY v.appraisal_id) AS total,
+         ROW_NUMBER() OVER(PARTITION BY v.appraisal_id ORDER BY v.revision DESC,v.recorded_at_ms DESC,v.id DESC) AS position
+       FROM emotion_appraisal_revisions v WHERE v.appraisal_id IN (${appraisals.map(() => '?').join(',')})
+     ) WHERE position<=? ORDER BY appraisal_id,revision,recorded_at_ms,id`, ...appraisals.map(row => row.id), MAX_REVISIONS) : []
+  const byAppraisal = new Map<string, { rows: EmotionTimelineRevision[]; total: number }>()
+  for (const row of revisions) {
+    let history = byAppraisal.get(row.appraisal_id)
+    if (!history) { history = { rows: [], total: Number(row.total) }; byAppraisal.set(row.appraisal_id, history) }
+    history.rows.push({ id: row.id, revision: row.revision, status: row.status, recordedAtMs: row.recorded_at_ms, vectorJson: row.vector_json.slice(0, VECTOR_CHARACTERS), vectorTruncated: row.vector_json.length > VECTOR_CHARACTERS })
+  }
+  const bySource = new Map<string, EmotionTimelineAppraisal[]>()
+  for (const row of appraisals) {
+    const history = byAppraisal.get(row.id)
+    const item: EmotionTimelineAppraisal = { id: row.id, revision: row.revision, status: row.status, evidenceQuote: row.evidence_quote, vectorJson: row.vector_json.slice(0, VECTOR_CHARACTERS), vectorTruncated: row.vector_json.length > VECTOR_CHARACTERS, revisions: history?.rows ?? [], revisionHistoryTotal: history?.total ?? 0, revisionHistoryTruncated: (history?.total ?? 0) > MAX_REVISIONS }
+    const items = bySource.get(row.source_message_id) ?? []
+    items.push(item)
+    bySource.set(row.source_message_id, items)
+  }
+  const states = new Map<number, ContinuousAffectState | null>()
+  const sameTimeCounts = new Map<number, number>()
+  for (const source of sources) {
+    const at = source.occurred_at_ms
+    if (!states.has(at)) {
+      states.set(at, continuousAffect(repos, config, principalId, at))
+      sameTimeCounts.set(at, repos.db.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM raw_messages r JOIN conversations c ON c.id=r.conversation_id
+         WHERE c.principal_id=? AND c.kind='private' AND ${humanSourceSql('r')} AND r.occurred_at_ms=?`, principalId, at)?.n ?? 0)
+    }
+    timeline.points.push({ sourceMessageId: source.id, conversationId: source.conversation_id, sourceSeq: source.seq, occurredAtMs: at, sourceText: source.content.slice(0, SOURCE_CHARACTERS), sourceTextTruncated: source.content.length > SOURCE_CHARACTERS, sameTimeSourceCount: sameTimeCounts.get(at)!, appraisals: bySource.get(source.id) ?? [], state: states.get(at) ?? null })
+  }
+  return timeline
+}

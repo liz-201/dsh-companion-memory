@@ -32,6 +32,9 @@ export interface TransferStatus {
   error: string | null
   foreignLibraries: ForeignLibrary[]
   notice: string | null
+  localStateHash?: string | null
+  uploadedStateHash?: string | null
+  snapshotUploaded?: boolean
 }
 export interface LibraryManifestFile { path: string; size: number; checksum: string; deviceId: string; updatedAtMs: number; modifiedAtMs: number }
 export interface LibraryManifest { format: string; companionId: string; ownerId: string; updatedAtMs: number; files: LibraryManifestFile[] }
@@ -134,10 +137,14 @@ export class MemoryTransfer {
   status(): TransferStatus {
     let connected = false
     try { connected = !!this.credentials.read()?.tokens?.accessToken } catch {}
-    return { enabled: this.enabled(), connected, busy: this.pending !== null || this.ownerMergeBusy, ready: this.finishedStartup,
+    const busy = this.pending !== null || this.ownerMergeBusy
+    const localStateHash = this.db.isOpen ? digest(stableJson(snapshotForTransfer(this.db))) : null
+    const uploadedStateHash = this.db.isOpen ? this.repos.getSetting('local.cloud.upload-fingerprint') ?? null : null
+    return { enabled: this.enabled(), connected, busy, ready: this.finishedStartup,
       lastSyncAtMs: this.lastSyncAtMs, lastExport: this.lastExport, imported: this.imported,
       conflicts: this.conflicts, lineageMissing: this.missingLineage, error: this.error,
-      foreignLibraries: this.foreign, notice: this.notice }
+      foreignLibraries: this.foreign, notice: this.notice, localStateHash, uploadedStateHash,
+      snapshotUploaded: !busy && !this.changedDuringUpload && localStateHash !== null && localStateHash === uploadedStateHash }
   }
 
   start(): void {

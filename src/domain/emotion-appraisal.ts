@@ -9,6 +9,8 @@ export interface EmotionAppraisal {
   deservingness?: number
   praiseworthiness?: number
   appealingness?: number
+  /** Explicit owner-directed approach/withdrawal; object liking is not a substitute. */
+  pull?: number
   likelihood?: number
   controllability?: number
   unexpectedness?: number
@@ -24,7 +26,7 @@ export interface EmotionAppraisal {
   confidence: number
 }
 
-const bipolar = ['desirability', 'desirabilityForOther', 'likingForOther', 'deservingness', 'praiseworthiness', 'appealingness'] as const
+const bipolar = ['desirability', 'desirabilityForOther', 'likingForOther', 'deservingness', 'praiseworthiness', 'appealingness', 'pull'] as const
 const unit = ['likelihood', 'controllability', 'unexpectedness', 'relevance', 'unfairness', 'relationshipThreat', 'personalAttention', 'helplessness', 'confidence'] as const
 const enums = { focus: ['event','action','object'], affectedParty: ['self','owner','other'], agency: ['self','owner','other','unknown'], prospect: ['pending','confirmed','disconfirmed','none'] }
 const keys = new Set([...bipolar, ...unit, ...Object.keys(enums), 'quote', 'suppliedEvidenceRef','suppliedBehaviorRef'])

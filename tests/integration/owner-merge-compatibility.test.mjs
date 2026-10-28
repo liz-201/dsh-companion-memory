@@ -69,29 +69,29 @@ function encodedFile(f, payload, name, envelopeVersion = payload.version) {
   return file
 }
 
-test('a schema-eight library protects its extensions with version four even before pairing', async t => {
+test('a current library protects its extensions with version five even before pairing', async t => {
   const f = device(t, 'ordinary')
   await populate(f, 'ordinary')
   const exported = pack(f, 'ordinary-export')
-  assert.equal(exported.envelope.version, 4)
-  assert.equal(exported.payload.version, 4)
-  assert.equal(exported.payload.formatVersion, 4)
+  assert.equal(exported.envelope.version, 5)
+  assert.equal(exported.payload.version, 5)
+  assert.equal(exported.payload.formatVersion, 5)
   assert.equal(f.repos.getSetting('memory.owner-merge-version'), undefined)
   assert.ok(!exported.payload.tables.plugin_settings.some(row => row.key === 'memory.owner-merge-version'))
 })
 
-test('an explicitly paired library advertises version four and the dev nine minimum reader in both its file layers', async t => {
+test('an explicitly paired library advertises version five and the dev ten minimum reader in both its file layers', async t => {
   const { local } = await paired(t)
   const exported = pack(local, 'paired-export')
   assert.equal(local.repos.getSetting('memory.owner-merge-version'), '1')
-  assert.equal(exported.envelope.version, 4)
-  assert.equal(exported.payload.version, 4)
-  assert.equal(exported.payload.formatVersion, 4)
-  assert.equal(exported.payload.minReaderVersion, '0.3.0-dev.9')
+  assert.equal(exported.envelope.version, 5)
+  assert.equal(exported.payload.version, 5)
+  assert.equal(exported.payload.formatVersion, 5)
+  assert.equal(exported.payload.minReaderVersion, '0.3.0-dev.10')
   assert.ok(exported.payload.tables.plugin_settings.some(row => row.key === 'memory.owner-merge-version' && row.value === '1'))
 })
 
-test('dev nine restores and round-trips version four without losing either history or downgrading later exports', async t => {
+test('dev ten restores and round-trips version five without losing either history or downgrading later exports', async t => {
   const { local, remote, localMemory, remoteMemory } = await paired(t)
   const originalEvents = local.db.all('SELECT id, payload_json, status FROM affect_events ORDER BY id')
   const exported = pack(local, 'version-four')
@@ -103,12 +103,12 @@ test('dev nine restores and round-trips version four without losing either histo
   assert.equal(restored.repos.getSetting('memory.owner-merge-version'), '1')
   assert.deepEqual(restored.db.all('SELECT id, payload_json, status FROM affect_events ORDER BY id'), originalEvents)
   const returned = pack(restored, 'returned-version-four')
-  assert.equal(returned.envelope.version, 4)
+  assert.equal(returned.envelope.version, 5)
   importPortable(remote.db, remote.config, returned.payload, returned.checksum, { nowMs: local.now() + 2 })
   assert.ok(remote.repos.getMemory(localMemory))
   assert.ok(remote.repos.getMemory(remoteMemory))
   assert.equal(remote.repos.getSetting('memory.owner-merge-version'), '1')
-  assert.equal(pack(remote, 'source-after-roundtrip').payload.version, 4)
+  assert.equal(pack(remote, 'source-after-roundtrip').payload.version, 5)
   const beforeRepeat = state(remote.db)
   assert.equal(importPortable(remote.db, remote.config, returned.payload, returned.checksum).alreadyImported, true)
   assert.deepEqual(state(remote.db), beforeRepeat)
@@ -145,28 +145,28 @@ test('a version-four source can itself be previewed and explicitly paired with a
   const { local, localMemory, remoteMemory } = await paired(t)
   const source = pack(local, 'already-paired-source')
   const third = device(t, 'third'), thirdMemory = await populate(third, 'third')
-  assert.equal(source.payload.version, 4)
+  assert.equal(source.payload.version, 5)
   const preview = previewOwnerMerge(third.db, third.config, source.payload, source.checksum)
   assert.deepEqual(preview.blockingConflicts, [])
   confirmOwnerMerge(third.db, third.config, source.payload, source.checksum, preview)
   assert.equal(third.owner.ownerId, source.payload.ownerId)
   for (const id of [localMemory, remoteMemory, thirdMemory]) assert.ok(third.repos.getMemory(id))
   assert.equal(third.repos.activeAffectEvents(third.owner.principalId).length, 3)
-  assert.equal(pack(third, 'three-device-export').envelope.version, 4)
+  assert.equal(pack(third, 'three-device-export').envelope.version, 5)
   assert.deepEqual(third.db.all('PRAGMA foreign_key_check'), [])
 })
 
-test('a previously paired dev seven library with aliases but no explicit capability marker exports version four after upgrading', async t => {
+test('a previously paired dev seven library with aliases but no explicit capability marker exports version five after upgrading', async t => {
   const { local, oldPrincipal } = await paired(t)
   local.db.run("DELETE FROM plugin_settings WHERE key = 'memory.owner-merge-version'")
   assert.equal(local.repos.getSetting('memory.owner-merge-version'), undefined)
   assert.ok(local.repos.getSetting(`identity.shared-alias:${oldPrincipal}`))
   const upgraded = pack(local, 'old-dev-seven-aliases')
-  assert.equal(upgraded.envelope.version, 4)
-  assert.equal(upgraded.payload.minReaderVersion, '0.3.0-dev.9')
+  assert.equal(upgraded.envelope.version, 5)
+  assert.equal(upgraded.payload.minReaderVersion, '0.3.0-dev.10')
 })
 
-test('importing version four persists the format capability even when the incoming rows omit its marker', async t => {
+test('importing version five persists the format capability even when the incoming rows omit its marker', async t => {
   const { local } = await paired(t)
   const exported = pack(local, 'v3-for-unmarked-input')
   const payload = structuredClone(exported.payload)
@@ -176,7 +176,7 @@ test('importing version four persists the format capability even when the incomi
   const restored = device(t, 'restore-unmarked-v3')
   importPortable(restored.db, restored.config, verified.payload, verified.checksum)
   assert.equal(restored.repos.getSetting('memory.owner-merge-version'), '1')
-  assert.equal(pack(restored, 'unmarked-v3-reexport').envelope.version, 4)
+  assert.equal(pack(restored, 'unmarked-v3-reexport').envelope.version, 5)
 })
 
 for (const change of ['delete', 'downgrade']) {
@@ -199,11 +199,11 @@ for (const change of ['delete', 'downgrade']) {
     assert.equal(olderPackage.envelope.version, 2)
     importPortable(local.db, local.config, olderPackage.payload, olderPackage.checksum)
     assert.equal(local.repos.getSetting('memory.owner-merge-version'), '1')
-    assert.equal(pack(local, `protected-after-${change}`).envelope.version, 4)
+    assert.equal(pack(local, `protected-after-${change}`).envelope.version, 5)
   })
 }
 
-test('version four still requires every transfer table and rejects mismatched envelope versions', async t => {
+test('version five still requires every transfer table and rejects mismatched envelope versions', async t => {
   const { local } = await paired(t)
   const source = pack(local, 'complete-version-four')
   for (const table of ['memories', 'personality_heads']) {
@@ -216,11 +216,11 @@ test('version four still requires every transfer table and rejects mismatched en
   assert.throws(() => readPortable(mislabeled), /Invalid|Unsupported/i)
 })
 
-test('paired alias and recorded-only tombstone semantics remain version four after restore and deletion replay', async t => {
+test('paired alias and recorded-only tombstone semantics remain version five after restore and deletion replay', async t => {
   const { local, localMemory, remoteMemory, oldPrincipal } = await paired(t, { deleteLocal: true })
   const source = pack(local, 'paired-deletion-and-aliases')
-  assert.equal(source.envelope.version, 4)
-  assert.equal(source.payload.version, 4)
+  assert.equal(source.envelope.version, 5)
+  assert.equal(source.payload.version, 5)
   assert.ok(source.payload.tables.plugin_settings.some(row => row.key === `identity.shared-alias:${oldPrincipal}`))
   assert.ok(source.payload.tables.deletion_tombstones.some(row => {
     const selector = JSON.parse(row.selector_json)
@@ -232,6 +232,6 @@ test('paired alias and recorded-only tombstone semantics remain version four aft
   assert.equal(restored.repos.getMemory(localMemory), undefined)
   assert.ok(restored.repos.getMemory(remoteMemory))
   const returned = pack(restored, 'special-semantics-reexport')
-  assert.equal(returned.envelope.version, 4, 'A restored package with new deletion/alias semantics must never look like version two')
-  assert.equal(returned.payload.minReaderVersion, '0.3.0-dev.9')
+  assert.equal(returned.envelope.version, 5, 'A restored package with new deletion/alias semantics must never look like version two')
+  assert.equal(returned.payload.minReaderVersion, '0.3.0-dev.10')
 })

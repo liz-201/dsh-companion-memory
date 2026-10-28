@@ -17,6 +17,7 @@ import { dedupeEvidence, FactUpdater, keyOf, type FactCandidate } from './fact-u
 import { estimateTokens } from '../runtime/context-budget.js'
 import { matchSourceQuote } from './quote-match.js'
 import { reuseOwnerMemoryId } from './identity-memory.js'
+import { detectSourceKind, isHumanMessage } from './source-policy.js'
 
 export interface BatchMessage {
   id: string
@@ -110,6 +111,7 @@ export class Consolidator {
     for (const row of rows) {
       cursor = Math.max(cursor, row.seq)
       if (row.deletedAtMs !== null) continue
+      if (detectSourceKind(row.content, row.sourceKind) === 'codex-bridge' || row.role === 'user' && !isHumanMessage(row)) { dropped++; continue }
       const content = row.content.trim()
       if (content === '' || estimateTokens(content) < MIN_MESSAGE_TOKENS) {
         dropped += 1
@@ -174,7 +176,7 @@ export class Consolidator {
     // Recheck evidence after the model call: a user may have deleted it meanwhile.
     const known = new Map(batch.messages.filter(message => {
       const current = this.repos.getRawMessage(message.id)
-      return current && current.deletedAtMs === null && current.conversationId === batch.conversationId
+      return current && isHumanMessage(current) && current.conversationId === batch.conversationId
     }).map((message) => [message.id, message]))
     const rejected: { index: number; reason: string }[] = []
     const touched: string[] = []

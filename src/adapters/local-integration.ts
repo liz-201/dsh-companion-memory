@@ -20,6 +20,9 @@ import { guardDesktopStream } from './desktop-expression.js'
 import { localObservation, visibleText } from '../runtime/local-observation.js'
 import { perceptionContext } from '../runtime/perception-context.js'
 import { recoverCapabilityExtractions } from '../runtime/extraction-recovery.js'
+import { detectSourceKind, isHumanMessage } from '../memory/source-policy.js'
+import { continuousAffect } from '../storage/continuous-affect.js'
+import { retrievalArousal } from '../domain/continuous-mood.js'
 
 type RecordValue = Record<string, unknown>
 const record = (value: unknown): RecordValue => value && typeof value === 'object' ? value as RecordValue : {}
@@ -69,7 +72,7 @@ export function installLocalIntegration(deps: {
   }
   background.register('extract', async job => {
     const message = repos.getRawMessage(String(job.payload['messageId']))
-    if (!message || message.role !== 'user' || message.deletedAtMs !== null) return
+    if (!message || !isHumanMessage(message)) return
     // Resolve the persisted conversation's shared owner, including after importing an older partitioned file.
     const conversation = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', message.conversationId)
     if (!conversation) return
@@ -96,7 +99,8 @@ export function installLocalIntegration(deps: {
     const event = record(value), agent = record(event['agent']), message = record(event['message'])
     const id = record(agent['session'])['id']
     if (typeof id === 'string' && excluded.has(String(agent['id']))) excludedSessions.add(id)
-    if (local(id) && !excluded.has(String(agent['id'])) && record(message['source'])['kind'] === 'user') {
+    if (local(id) && !excluded.has(String(agent['id'])) && record(message['source'])['kind'] === 'user'
+      && detectSourceKind(textOf(message), 'dsh') === 'dsh') {
       agents.set(id, agent)
       latest.set(id, textOf(message))
       if (latest.size > 1000) latest.delete(latest.keys().next().value!)
@@ -134,7 +138,9 @@ export function installLocalIntegration(deps: {
     const snapshot = repos.getSnapshot(binding.principalId)
     // A new window has no query yet: seed its bounded context with shared preferences instead of a blank identity.
     const query = latest.get(id) ?? ''
-    const memories = deps.retriever.retrieve({ binding, query: query || '用户 喜欢 偏好', nowMs: Date.now() }).selected
+    const nowMs = Date.now()
+    const continuous = continuousAffect(repos,config,binding.principalId,nowMs)
+    const memories = deps.retriever.retrieve({ binding, query: query || '用户 喜欢 偏好', ...(snapshot ? {emotionArousal:retrievalArousal(continuous,snapshot.snapshot.mood)} : {}), nowMs }).selected
       .filter(memory => query !== '' || ['fact', 'preference', 'interaction_rule'].includes(memory.row.kind))
     const projectedClaims = new Map(memories.map(memory => [memory.row.id, memory.item.claim]))
     const projected = snapshot ? projectSnapshot(snapshot.snapshot, Date.now(), config.affect) : undefined
@@ -176,7 +182,7 @@ export function installLocalIntegration(deps: {
         const binding=owner.binding('dsh',id,owner.deviceId,Date.now(),personas.resolve(agent,assembly['sections']))
         const source=repos.db.get<{id:string}>("SELECT id FROM raw_messages WHERE conversation_id=? AND role='user' AND deleted_at_ms IS NULL ORDER BY seq DESC LIMIT 1",binding.conversationId)
         const message=source?repos.getRawMessage(source.id):null
-        if(message)await deps.coordinator.observeBeforeReply(binding,message)
+        if(message && isHumanMessage(message))await deps.coordinator.observeBeforeReply(binding,message)
       }
     }
     const text = memoryText(context, assembly['sections'])
@@ -206,21 +212,22 @@ export function installLocalIntegration(deps: {
     if (key === 'undefined') return
     repos.db.transaction(() => {
       const inserted = repos.insertRawMessage({ id: `${binding.conversationId}:${key}`, conversationId: binding.conversationId,
-        platformMessageKey: key, role: user ? 'user' : 'assistant', sourceKind: 'dsh', content: text,
+        platformMessageKey: key, role: user ? 'user' : 'assistant', sourceKind: detectSourceKind(text, 'dsh'), content: text,
         occurredAtMs: typeof event['time'] === 'number' ? event['time'] : now, observedAtMs: now,
         deliveryStatus: user ? null : 'accepted', deletedAtMs: null })
-      if (user && inserted.inserted) background.enqueue('extract', { messageId: inserted.row.id, sessionId: id }, {
+      if (user && inserted.inserted && isHumanMessage(inserted.row)) background.enqueue('extract', { messageId: inserted.row.id, sessionId: id }, {
         dedupKey: `observe:${inserted.row.id}`, principalId: binding.principalId, availableAtMs: now + 1000, nowMs: now,
       })
-      if (user && inserted.inserted) scheduleConsolidation(repos, config, background, binding.conversationId, binding.principalId, now)
-      if (user && inserted.inserted) {
+      if (user && inserted.inserted && isHumanMessage(inserted.row)) scheduleConsolidation(repos, config, background, binding.conversationId, binding.principalId, now)
+      if (user && inserted.inserted && isHumanMessage(inserted.row)) {
         learnExplicitHabit(repos, binding, inserted.row)
         observeFeedback(repos, binding, inserted.row)
         observeOpportunity(repos, binding, inserted.row)
       }
     })
-    if (user) latest.set(id, text)
-    if (user) {
+    const human = user && detectSourceKind(text, 'dsh') === 'dsh'
+    if (human) latest.set(id, text)
+    if (human) {
       if (!agents.has(id)) agents.set(id, { session })
     deps.localTarget?.(session, binding, personas.resolve({ session }).id)
     }

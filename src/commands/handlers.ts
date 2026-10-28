@@ -681,7 +681,7 @@ function commandDoctor(deps: FishCommandDeps, input: FishCommandInput): FishComm
     if (pairs.length > 0) lines.push(`后台任务：${pairs.join(' · ')}`)
   }
 
-  const stuck = repos.unresolvedOutbox(input.binding.conversationId, input.nowMs - 24 * 3600_000)
+  const stuck = repos.unresolvedOutbox(input.binding.conversationId, input.nowMs - 24 * 3600_000, input.nowMs - 24 * 3600_000)
   if (stuck.length > 0) lines.push(`⚠ 24 小时内有 ${stuck.length} 条投递未确认`)
 
   return ok(lines.join('\n'))

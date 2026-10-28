@@ -24,7 +24,8 @@ import { checkEligibility, isRepairIntent } from '../domain/event-policy.js'
 import { initialSnapshot, projectSnapshot, reduce } from '../domain/affect-reducer.js'
 import { personalityPreset } from '../domain/personality.js'
 import { dailyUsage, rebuildAffect } from '../domain/affect-projector.js'
-import { saveEmotionAppraisals, priorExpectations, priorBehaviors } from '../storage/continuous-affect.js'
+import { saveEmotionAppraisals, priorExpectations, priorBehaviors, continuousAffect } from '../storage/continuous-affect.js'
+import { continuousMood, retrievalArousal } from '../domain/continuous-mood.js'
 import { EMOTION_CONTRACT, parseObservation } from './emotion-observation.js'
 import { perceptionContext } from './perception-context.js'
 import type { EmotionAppraisal } from '../domain/emotion-appraisal.js'
@@ -53,6 +54,8 @@ import { annotateEpisode } from '../memory/episodic.js'
 import { learnExplicitHabit } from '../memory/habit-learning.js'
 import { observeOpportunity } from '../proactive/opportunity.js'
 import { observeFeedback } from '../proactive/feedback.js'
+import { isHumanMessage } from '../memory/source-policy.js'
+import { currentStrategyAppraisal, observationStrategyAppraisals } from './strategy-appraisal.js'
 
 export interface ModelCallRequest {
   images?: {data:string;mediaType:'image/png'}[]
@@ -157,6 +160,9 @@ export class TurnCoordinator {
   private readonly counter: TokenCounter
   private readonly expression: ExpressionRuntime
   private readonly observations = new Map<string,Promise<void>>()
+  private readonly strategyObservations = new Map<string, { signature: string; appraisals: ValidatedAppraisal[] }>()
+
+  get activeObservations(): number { return this.observations.size }
 
   constructor(private readonly deps: TurnCoordinatorDeps) {
     this.clock = deps.clock ?? systemClock
@@ -175,6 +181,7 @@ export class TurnCoordinator {
 
   /** One bounded extraction shared by pre-reply evaluation and the durable retry queue. */
   requestObservation(binding:IdentityBinding,message:RawMessage,id=`observation:${message.id}`,attempt=1,previousError?:string,options:{callModel?:ModelCaller;active?:()=>boolean}={}):Promise<void> {
+    if (!isHumanMessage(message)) return Promise.resolve()
     const deps=this.deps,key=`emotion.observed:${message.id}`,signature=hashKey(message.content)
     if(deps.repos.getSetting(key)===signature)return Promise.resolve()
     const existing=this.observations.get(message.id)
@@ -200,7 +207,11 @@ export class TurnCoordinator {
       if(controller.signal.aborted||options.active?.()===false||!current||current.deletedAtMs!==null||current.content!==message.content)return
       const parsed=parseObservation(output)
       await this.observe(binding,current,parsed.legacy,{...(parsed.appraisals?{appraisals:parsed.appraisals}:{}),skipLegacy:message.sourceKind==='qq'})
-      if(!controller.signal.aborted)deps.repos.setSetting(key,signature,this.clock.now())
+      if(!controller.signal.aborted) {
+        this.strategyObservations.set(message.id, { signature, appraisals: observationStrategyAppraisals(parsed.legacy, current) })
+        if (this.strategyObservations.size > 1000) this.strategyObservations.delete(this.strategyObservations.keys().next().value!)
+        deps.repos.setSetting(key,signature,this.clock.now())
+      }
     }
     const timeoutMs=id.startsWith('before-reply:')?deps.config.emotion.timeoutMs:deps.config.emotion.backgroundTimeoutMs
     const promise=Promise.race([execute(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('Observation timed out'))},timeoutMs)})])
@@ -220,7 +231,7 @@ export class TurnCoordinator {
   /** Apply background observations to a persisted host message without generating a second reply. */
   async observe(binding: IdentityBinding, message: RawMessage, payload: EvtPayload,
     options: { producer?: 'background_observer' | 'local_rule'; appraisals?: EmotionAppraisal[]; skipLegacy?: boolean } = {}): Promise<void> {
-    if (message.role !== 'user' || this.deps.repos.getRawMessage(message.id)?.deletedAtMs !== null || this.deps.repos.getRawMessage(message.id)?.content!==message.content) return
+    if (!isHumanMessage(message) || this.deps.repos.getRawMessage(message.id)?.deletedAtMs !== null || this.deps.repos.getRawMessage(message.id)?.content!==message.content) return
     const now = this.clock.now()
     const turnId = `observe:${message.id}`
     const previousTurn = this.deps.repos.getTurn(turnId)
@@ -299,6 +310,7 @@ export class TurnCoordinator {
       if (!inserted.inserted) {
         return { ...base, status: 'skipped', problems: ['duplicate-inbound'], durationMs: this.clock.now() - startedAt }
       }
+      if (!isHumanMessage(message)) return { ...base, status: 'skipped', problems: ['non-human-source'], durationMs: this.clock.now() - startedAt }
       if(message.sourceKind==='qq'&&binding.visibility==='private')this.deps.background?.enqueue('extract',{messageId:message.id},{dedupKey:`observe:${message.id}`,principalId:binding.principalId,availableAtMs:startedAt+1000,nowMs:startedAt})
     } catch (error) {
       return { ...base, status: 'failed', error: describeError(error), durationMs: this.clock.now() - startedAt }
@@ -376,12 +388,14 @@ export class TurnCoordinator {
       deps.repos.createTurn({ id: turnId, conversation_id: conversationId, session_id: inbound.sessionId,
         inbound_message_id: message.id, state_revision_used: null, status: 'running', started_at_ms: now })
       const stored = deps.repos.getSnapshot(binding.principalId)
-      const snapshot = stored === undefined
+      const legacySnapshot = stored === undefined
         ? initialSnapshot(binding.principalId, deps.config.companion.preset, deps.config.affect.ruleVersion, now)
         : projectSnapshot(stored.snapshot, now, deps.config.affect)
-      deps.repos.putSnapshot(snapshot, stored?.revision ?? 0)
+      deps.repos.putSnapshot(legacySnapshot, stored?.revision ?? 0)
+      const continuous = continuousAffect(deps.repos,deps.config,binding.principalId,now)
+      const snapshot = {...legacySnapshot,mood:continuousMood(continuous,legacySnapshot.mood)}
       const retrievalAt = this.clock.now()
-      const retrieval = deps.retriever.retrieve({ binding, query: inbound.text, emotionArousal: arousalOf(snapshot), nowMs: now })
+      const retrieval = deps.retriever.retrieve({ binding, query: inbound.text, emotionArousal: retrievalArousal(continuous,legacySnapshot.mood), nowMs: now })
       deps.metrics.record(turnId, 'retrieval', this.clock.now() - retrievalAt, this.clock.now())
       const pending = deps.repos.pendingTasks(conversationId, 5)
       const boundaries = renderBoundaries({
@@ -389,8 +403,12 @@ export class TurnCoordinator {
         pendingReminders: pending.filter(row => row['kind'] === 'reminder').map(row => String(row['content'])),
         scopeNote: (binding.visibility === 'group' ? '当前是群聊：不得复述私聊资料。' : '当前是本人私聊。') + (deps.deviceText ?? ''),
       })
-      const strategy = decideStrategy({ snapshot, appraisal: undefined,
-        establishedTeasingContext: deps.teasingContext?.(conversationId) ?? false,
+      const teasing = deps.teasingContext?.(conversationId) ?? false
+      const observed = this.strategyObservations.get(message.id)
+      const appraisal = currentStrategyAppraisal(deps.repos, binding, message, deps.config.affect,
+        observed?.signature === hashKey(message.content) ? observed.appraisals : [], teasing)
+      const strategy = decideStrategy({ snapshot, ...(appraisal ? { appraisal } : {}),
+        establishedTeasingContext: teasing,
         technicalRequest: looksTechnical(inbound.text), config: deps.config.affect })
       const recent = deps.repos.recentRawMessages(conversationId, 12, message.seq)
         .filter(row => row.role === 'user' || (row.role === 'assistant' && ['accepted', 'sent', 'delivered'].includes(row.deliveryStatus ?? '')))
@@ -733,11 +751,6 @@ export class TurnCoordinator {
       expectedInboundSeq: this.deps.repos.latestInboundSeq(binding.conversationId),
     })
   }
-}
-
-function arousalOf(snapshot: { mood: { anger: number; hurt: number; joy: number; tension: number } }): number {
-  const raw = snapshot.mood.anger * 0.5 + snapshot.mood.tension * 0.3 + snapshot.mood.hurt * 0.2
-  return Math.max(0, Math.min(1, raw))
 }
 
 function looksTechnical(text: string): boolean {

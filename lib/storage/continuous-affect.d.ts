@@ -1,19 +1,8 @@
 import type { Config } from '../config.js';
 import type { Repositories } from './repositories.js';
 import type { IdentityBinding, RawMessage } from '../domain/types.js';
-import { type EmotionComponent } from '../domain/occ-classifier.js';
-import { type DriveState } from '../domain/drive-projector.js';
-import { projectPad } from '../domain/pad-projector.js';
-export interface ContinuousAffectState {
-    version: 'continuous-v1';
-    parameterVersion: string;
-    drives: DriveState;
-    pad: ReturnType<typeof projectPad>;
-    emotions: EmotionComponent[];
-    displays: string[];
-    evidenceIds: string[];
-    appraisalCount: number;
-}
+import type { ContinuousAffectState } from '../domain/continuous-affect.js';
+export type { ContinuousAffectState } from '../domain/continuous-affect.js';
 /** Host binds all identities and quotes; model references are restricted to the supplied owner history. */
 export declare function saveEmotionAppraisals(repos: Repositories, binding: IdentityBinding, message: RawMessage, candidates: unknown, producer?: string): number;
 export declare function retractEmotionAppraisal(repos: Repositories, id: string, principalId: string): number;

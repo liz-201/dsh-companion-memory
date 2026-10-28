@@ -46,7 +46,8 @@ export declare class PluginPanel implements PanelControls {
         conversationId?: string;
         query?: string;
     }): {
-        continuous: import("../storage/continuous-affect.js").ContinuousAffectState | null;
+        continuous: import("../domain/continuous-affect.js").ContinuousAffectState | null;
+        emotionTimeline: import("../storage/emotion-timeline.js").EmotionTimeline;
         emotion: import("../config.js").EmotionConfig;
         perception: {
             settings: import("../config.js").PerceptionConfig;

@@ -8,6 +8,7 @@
  */
 
 import type { Database, Row } from './database.js'
+import { detectSourceKind, humanSourceSql, isHumanMessage } from '../memory/source-policy.js'
 import type {
   AffectSnapshot,
   DeliveryReceipt,
@@ -208,14 +209,14 @@ export class Repositories {
       message.conversationId,
       message.platformMessageKey,
       message.role,
-      message.sourceKind,
+      detectSourceKind(message.content, message.sourceKind),
       message.content,
       message.occurredAtMs,
       message.observedAtMs,
       message.deliveryStatus,
       message.deletedAtMs,
     )
-    if (message.role === 'user') {
+    if (isHumanMessage(message)) {
       this.db.run(
         `UPDATE conversations
          SET latest_inbound_seq = (SELECT MAX(seq) FROM raw_messages WHERE conversation_id = ? AND role = 'user')
@@ -268,7 +269,7 @@ export class Repositories {
 
   latestInboundSeq(conversationId: string): number {
     const row = this.db.get<{ seq: number | null }>(
-      "SELECT MAX(seq) AS seq FROM raw_messages WHERE conversation_id = ? AND role = 'user'",
+      `SELECT MAX(seq) AS seq FROM raw_messages WHERE conversation_id = ? AND ${humanSourceSql()}`,
       conversationId,
     )
     return Number(row?.seq ?? 0)
@@ -469,7 +470,7 @@ export class Repositories {
 
   activeAffectEvents(principalId: string): Row[] {
     return this.db.all<Row>(
-      "SELECT * FROM affect_events WHERE principal_id = ? AND status = 'active' ORDER BY seq",
+      `SELECT e.* FROM affect_events e LEFT JOIN appraisals a ON a.id=e.appraisal_id LEFT JOIN raw_messages r ON r.id=COALESCE(a.source_message_id,CASE WHEN json_valid(e.payload_json) THEN json_extract(e.payload_json,'$.appraisal.sourceMessageId') END) LEFT JOIN conversations c ON c.id=r.conversation_id WHERE e.principal_id = ? AND e.status = 'active' AND (r.id IS NULL OR (c.principal_id=e.principal_id AND ${humanSourceSql('r')})) ORDER BY e.seq`,
       principalId,
     )
   }
@@ -952,14 +953,17 @@ export class Repositories {
   }
 
   /** 有过期未确认的主动消息（用于「未回复就暂停」判定，§14.2）。 */
-  unresolvedOutbox(conversationId: string, sinceMs: number): Row[] {
+  unresolvedOutbox(conversationId: string, sinceMs: number, unknownSinceMs = Date.now() - 24 * 3600_000): Row[] {
     return this.db.all<Row>(
-      `SELECT * FROM outbox WHERE conversation_id IN (SELECT peer.id FROM conversations peer WHERE peer.principal_id = (SELECT principal_id FROM conversations WHERE id = ?)) AND ${SPONTANEOUS_OUTBOX} AND planned_at_ms >= ?
+      `SELECT * FROM outbox WHERE conversation_id IN (SELECT peer.id FROM conversations peer WHERE peer.principal_id = (SELECT principal_id FROM conversations WHERE id = ?)) AND ${SPONTANEOUS_OUTBOX}
+       AND (CASE WHEN status='unknown' THEN COALESCE(sent_at_ms,planned_at_ms) ELSE planned_at_ms END) >= ?
        AND status IN ('pending','sending','sent','unknown')
-       AND NOT EXISTS (SELECT 1 FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE c.principal_id = (SELECT principal_id FROM conversations WHERE id = outbox.conversation_id) AND r.role = 'user' AND r.observed_at_ms > COALESCE(outbox.sent_at_ms, outbox.planned_at_ms))
+       AND (status <> 'unknown' OR COALESCE(sent_at_ms,planned_at_ms) >= ?)
+       AND NOT EXISTS (SELECT 1 FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE c.principal_id = (SELECT principal_id FROM conversations WHERE id = outbox.conversation_id) AND ${humanSourceSql('r')} AND r.observed_at_ms > COALESCE(outbox.sent_at_ms, outbox.planned_at_ms))
        ORDER BY planned_at_ms`,
       conversationId,
       sinceMs,
+      unknownSinceMs,
     )
   }
 

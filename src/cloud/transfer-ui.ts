@@ -10,6 +10,20 @@ import { panelStyle, panelSections, panelScript } from '../panel/page.js'
 import { ConfigError } from '../config.js'
 import { PanelInputError } from '../panel/errors.js'
 
+export interface TransferCloseoutStatus {
+  paused: boolean
+  drained: boolean
+  activeLeases: number
+  foreground: number
+  pending: number
+}
+
+export interface TransferLifecycle {
+  pause(): TransferCloseoutStatus | Promise<TransferCloseoutStatus>
+  status(): TransferCloseoutStatus | Promise<TransferCloseoutStatus>
+  resume(): TransferCloseoutStatus | Promise<TransferCloseoutStatus>
+}
+
 const html = (token: string, fullPanel: boolean): string => `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>情感记忆插件 · 控制台</title>
 <style>body{font:16px/1.7 system-ui,sans-serif;max-width:850px;margin:40px auto;padding:0 24px;color:#233044;background:#f6f8fb}section{background:white;border:1px solid #dde3ed;border-radius:14px;padding:22px;margin:20px 0}h1{font-size:28px}h2{font-size:19px;margin-top:0}button,a.button{font:inherit;background:#245fca;color:white;border:0;border-radius:7px;padding:9px 16px;cursor:pointer;text-decoration:none;display:inline-block;margin:5px 8px 5px 0}button.secondary{background:#e7edf6;color:#233044}input{font:inherit;display:block;width:95%;padding:9px;margin:7px 0 14px;border:1px solid #bbc7d9;border-radius:6px}small{color:#58677d}#message{white-space:pre-wrap}button:disabled{opacity:.5;cursor:wait}.status{white-space:pre-wrap;font-size:14px}label{display:block}</style>
 <style>${fullPanel ? panelStyle : ''}</style><h1>情感记忆 · 插件控制台</h1><p>记忆管理、性格与情绪、主动联系和同步。${fullPanel ? '在这里查看并操作插件的全部功能。' : '连接百度网盘后，打开 DSH 会自动检查云端并合并记忆。'}</p>
@@ -35,9 +49,17 @@ $('sync').onclick=()=>run(async()=>{const s=await request('sync',{});describe(s)
 $('disconnect').onclick=()=>run(async()=>{await request('disconnect',{});$('message').textContent='已断开。本地记忆和云端已有文件均保留。'});${fullPanel ? panelScript + '\npanelRefresh=refreshPanel;' : ''}refresh();setInterval(refresh,5000);</script></html>`
 
 /** Loopback UI with an unguessable same-origin action token; no CORS/credential echo. */
-export function createTransferHandler(transfer: MemoryTransfer, controls?: PanelControls) {
+export function createTransferHandler(transfer: MemoryTransfer, controls?: PanelControls, lifecycle?: TransferLifecycle) {
   const token = randomUUID() + randomUUID()
   const downloads = new Map<string, string>()
+  let pauseRequested = false, activeMutations = 0
+  const mutationWaiters = new Set<() => void>()
+  const closeoutStatus = async (): Promise<TransferCloseoutStatus> => {
+    const status = await lifecycle!.status()
+    return { ...status, paused: pauseRequested || status.paused, drained: status.drained && activeMutations === 0,
+      foreground: status.foreground + activeMutations }
+  }
+  const waitForMutations = (): Promise<void> => activeMutations === 0 ? Promise.resolve() : new Promise(resolve => { mutationWaiters.add(resolve) })
   const headers = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'none'; form-action 'self'" }
   return async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const send = (code: number, value: unknown): void => { response.writeHead(code, { ...headers, 'content-type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(value)) }
@@ -55,8 +77,18 @@ export function createTransferHandler(transfer: MemoryTransfer, controls?: Panel
     const origin = request.headers.origin
     if (origin && origin !== url.origin) { send(403, { error: '请求来源无效。' }); return }
     const action = url.pathname.slice('/companion-memory/api/'.length)
+    const mutating = !['export', 'sync', 'closeout-pause', 'closeout-resume'].includes(action)
+    let holdsMutation = false
+    const rejectPaused = async (): Promise<boolean> => {
+      if (!lifecycle || !mutating || !pauseRequested && !(await lifecycle.status()).paused) return false
+      send(409, { code: 'closeout-paused', error: '记忆服务已为本次收尾暂停，导出与同步仍可用；恢复后可继续修改。' }); return true
+    }
     try {
       if (request.method === 'GET' && action === 'status') { send(200, transfer.status()); return }
+      if (request.method === 'GET' && action === 'closeout-status') {
+        if (!lifecycle) { send(404, { code: 'closeout-unsupported', error: '当前插件未提供收尾暂停接口。' }); return }
+        send(200, await closeoutStatus()); return
+      }
       if (request.method === 'GET' && action === 'panel' && controls) { await transfer.ready; send(200, controls.snapshot({ conversationId: url.searchParams.get('conversationId') || undefined, query: url.searchParams.get('query') || undefined })); return }
       if (request.method === 'GET' && action === 'download') {
         const file = downloads.get(url.searchParams.get('id') ?? '')
@@ -64,14 +96,30 @@ export function createTransferHandler(transfer: MemoryTransfer, controls?: Panel
         response.writeHead(200, { ...headers, 'content-type': 'application/json', 'content-disposition': `attachment; filename="${basename(file)}"` }); response.end(readFileSync(file)); return
       }
       if (request.method !== 'POST') { send(405, { error: '不支持的操作。' }); return }
-      if (!['import', 'export', 'sync', 'connect', 'authorize', 'disconnect', 'merge-preview', 'merge-cloud-preview', 'merge-confirm', ...(controls ? ['panel-action'] : [])].includes(action)) { send(404, { error: '操作不存在。' }); return }
+      if (!['import', 'export', 'sync', 'connect', 'authorize', 'disconnect', 'merge-preview', 'merge-cloud-preview', 'merge-confirm', 'closeout-pause', 'closeout-resume', ...(controls ? ['panel-action'] : [])].includes(action)) { send(404, { error: '操作不存在。' }); return }
+      if (await rejectPaused()) return
+      if (mutating && lifecycle) { activeMutations++; holdsMutation = true }
       const limit = action === 'import' || action === 'merge-preview' ? 512 * 1024 * 1024 : 16 * 1024
       const chunks: Buffer[] = []
       let size = 0
       for await (const chunk of request) { const bytes = Buffer.from(chunk as Uint8Array); size += bytes.length; if (size > limit) { send(413, { error: '文件或请求超过大小限制。' }); return } chunks.push(bytes) }
       const bytes = Buffer.concat(chunks)
-      if (action === 'panel-action' && controls) { await transfer.ready; send(200, await controls.action(JSON.parse(bytes.toString('utf8')))); return }
-      if (['import', 'export', 'merge-cloud-preview', 'merge-confirm'].includes(action)) await transfer.ready
+      if (await rejectPaused()) return
+      if (action === 'panel-action' && controls) { await transfer.ready; if (await rejectPaused()) return; send(200, await controls.action(JSON.parse(bytes.toString('utf8')))); return }
+      if (['import', 'export', 'merge-cloud-preview', 'merge-confirm', 'closeout-pause', 'closeout-resume'].includes(action)) await transfer.ready
+      if (await rejectPaused()) return
+      if (action === 'closeout-pause' || action === 'closeout-resume') {
+        if (!lifecycle) { send(404, { code: 'closeout-unsupported', error: '当前插件未提供收尾暂停接口。' }); return }
+        if (action === 'closeout-pause') {
+          pauseRequested = true
+          await lifecycle.pause()
+          await waitForMutations()
+        } else {
+          const status = await lifecycle.resume()
+          pauseRequested = status.paused
+        }
+        send(200, await closeoutStatus()); return
+      }
       if (action === 'merge-preview') { send(200, transfer.prepareOwnerMerge(bytes)); return }
       if (action === 'merge-cloud-preview') { send(200, await transfer.prepareCloudOwnerMerge()); return }
       if (action === 'merge-confirm') {
@@ -98,6 +146,11 @@ export function createTransferHandler(transfer: MemoryTransfer, controls?: Panel
       const pending = (error as { code?: string })?.code === 'authorization_pending'
       const ownerMismatch = error instanceof PortableImportError && error.code === 'owner-mismatch'
       send(ownerMismatch ? 409 : 400, { ...(ownerMismatch ? { code: 'owner-mismatch' } : {}), error: error instanceof ConfigError || error instanceof PanelInputError || error instanceof OwnerMergeInputError ? error.message : pending ? '百度授权尚未完成，请完成后再试。' : ownerMismatch ? '文件与本机的主人编号不同，已停止普通导入并保留本地记忆。若两边都是你，请使用“两台已有记忆首次配对”预览合并。' : action.startsWith('merge-') ? '合并未执行。请重新预览；确认两份文件属于同一用户，且本机记忆未变化、没有阻断冲突。双方原始记忆仍保留。' : action === 'panel-action' ? '操作未完成，请检查输入或查看运行状态。本地数据已保留。' : '操作未完成，请检查文件格式、同步状态或百度授权。本地记忆已保留。' })
+    } finally {
+      if (holdsMutation && --activeMutations === 0) {
+        for (const resolve of mutationWaiters) resolve()
+        mutationWaiters.clear()
+      }
     }
   }
 }

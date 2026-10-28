@@ -9,6 +9,8 @@ export interface EmotionAppraisal {
     deservingness?: number;
     praiseworthiness?: number;
     appealingness?: number;
+    /** Explicit owner-directed approach/withdrawal; object liking is not a substitute. */
+    pull?: number;
     likelihood?: number;
     controllability?: number;
     unexpectedness?: number;

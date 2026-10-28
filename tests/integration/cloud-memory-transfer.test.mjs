@@ -79,6 +79,45 @@ test('opening a new instance downloads cloud memory before startup readiness and
   assert.equal(b.transfer.status().error, null)
 })
 
+test('snapshot status proves the current transferable state matches a verified upload without writing on read', async t => {
+  const a = setup(t, new FakeCloud(), 'snapshot-proof')
+  raw(a, 'before-upload')
+  const before = a.transfer.status()
+  assert.match(before.localStateHash, /^[a-f0-9]{64}$/)
+  assert.equal(before.uploadedStateHash, null)
+  assert.equal(before.snapshotUploaded, false)
+  const changes = a.db.get('SELECT total_changes() AS n').n
+  assert.deepEqual(a.transfer.status(), before)
+  assert.equal(a.db.get('SELECT total_changes() AS n').n, changes)
+  await a.transfer.sync()
+  const uploaded = a.transfer.status()
+  assert.equal(uploaded.snapshotUploaded, true)
+  assert.equal(uploaded.localStateHash, uploaded.uploadedStateHash)
+  raw(a, 'after-upload')
+  const changed = a.transfer.status()
+  assert.equal(changed.snapshotUploaded, false)
+  assert.notEqual(changed.localStateHash, changed.uploadedStateHash)
+})
+
+test('changes during upload remain unverified until the follow-up snapshot has finished', async t => {
+  const cloud = new FakeCloud(), a = setup(t, cloud, 'snapshot-inflight')
+  let release, entered
+  const gate = new Promise(resolve => { release = resolve }), uploading = new Promise(resolve => { entered = resolve })
+  const upload = cloud.upload.bind(cloud)
+  cloud.upload = async (path, bytes) => { if (path.endsWith('.companion.json')) { entered(); await gate } return upload(path, bytes) }
+  raw(a, 'first')
+  const pending = a.transfer.sync()
+  await uploading
+  raw(a, 'during-upload')
+  assert.equal(a.transfer.status().busy, true)
+  assert.equal(a.transfer.status().snapshotUploaded, false)
+  release()
+  await pending
+  await a.transfer.sync()
+  assert.equal(a.transfer.status().busy, false)
+  assert.equal(a.transfer.status().snapshotUploaded, true)
+})
+
 test('startup bounds cloud network waiting and continues with local memory before retrying', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
   const cloud = new FakeCloud(), a = setup(t, cloud, 'a')

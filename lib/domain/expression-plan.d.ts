@@ -1,7 +1,7 @@
 import type { AffectSnapshot } from './types.js';
 import { type PersonalityProfile } from './personality-profile.js';
 import { type TaskMode } from '../expression/task-mode.js';
-import type { ContinuousAffectState } from '../storage/continuous-affect.js';
+import type { ContinuousAffectState } from './continuous-affect.js';
 export interface ExpressionPlan {
     continuous?: ContinuousAffectState;
     ruleVersion: string;

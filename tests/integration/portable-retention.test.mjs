@@ -32,7 +32,7 @@ test('checkpoint retention stays bounded and pruning does not re-import older ow
     const file = i === 0 ? first : join(f.directory, `state-${i}.json`)
     exportPortable(f.db, f.config, file, { includePlugin: false, nowMs: f.now() + i })
     const { payload } = readPortable(file)
-    assert.equal(payload.version, 4)
+    assert.equal(payload.version, 5)
     assert.ok(payload.ancestors.length <= 8)
   }
   assert.ok(f.db.get('SELECT COUNT(*) AS n FROM portable_checkpoints').n <= 8)

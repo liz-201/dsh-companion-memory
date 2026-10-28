@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
 import type { Repositories } from '../storage/repositories.js'
 import type { IdentityBinding, RawMessage } from '../domain/types.js'
+import { humanSourceSql, isHumanMessage } from './source-policy.js'
 export interface ExpressionHabit { id: string; kind: string; value: string; sources: string[]; status: string }
 export function learnExplicitHabit(repos: Repositories, binding: IdentityBinding, message: RawMessage): void {
   const text = message.content
-  if (message.role !== 'user' || message.deletedAtMs !== null || /比如|假如|例如|台词|引用|[“「『]/.test(text) || /这次|这一条|这条回复/.test(text)) return
+  if (!isHumanMessage(message) || /比如|假如|例如|台词|引用|[“「『]/.test(text) || /这次|这一条|这条回复/.test(text)) return
   let kind = '', value = ''
   const address = text.match(/(?:以后)?(?:别|不要)(?:再)?(?:叫|称呼)我([^，。！？\n]{1,12})/)
   const meme = text.match(/^以后(?:我们)?(?:可以|就|偶尔)?用(?:这个)?梗[：:]\s*(.{1,40})$/)
@@ -25,7 +26,7 @@ export function learnExplicitHabit(repos: Repositories, binding: IdentityBinding
   })
 }
 function proposeImplicitVerbosity(repos: Repositories, binding: IdentityBinding, nowMs: number): void {
-  const rows = repos.db.all<{ id: string; content: string; observed_at_ms: number }>("SELECT id, content, observed_at_ms FROM raw_messages WHERE conversation_id = ? AND role = 'user' AND deleted_at_ms IS NULL ORDER BY seq DESC LIMIT 3", binding.conversationId)
+  const rows = repos.db.all<{ id: string; content: string; observed_at_ms: number }>(`SELECT id, content, observed_at_ms FROM raw_messages WHERE conversation_id = ? AND ${humanSourceSql()} ORDER BY seq DESC LIMIT 3`, binding.conversationId)
   if (rows.length < 3 || rows.some(row => row.content.length >= 40 || /例如|比如|台词|[“「]/.test(row.content))) return
   const id = `implicit-verbosity:${binding.principalId}:${binding.conversationId}`
   repos.db.run("INSERT OR IGNORE INTO expression_habits VALUES (?, ?, 'implicit_verbosity', ?, ?, 'proposed', .4, ?, ?, NULL, ?, NULL)", id, binding.principalId, JSON.stringify('用户消息往往简短；只作待确认候选，不代表要求助手短答'), JSON.stringify({ visibility: binding.visibility, conversationId: binding.visibility === 'group' ? binding.conversationId : null }), JSON.stringify(rows.slice(0, 3).map(row => row.id)), id, nowMs)
@@ -35,7 +36,7 @@ export function activeHabits(repos: Repositories, binding: Pick<IdentityBinding,
     const scope = JSON.parse(String(row['scope_json'])) as { visibility: string; conversationId: string | null }
     if (scope.visibility !== binding.visibility || scope.conversationId && scope.conversationId !== binding.conversationId) return false
     const sources = JSON.parse(String(row['source_ids_json'])) as string[]
-    return sources.length > 0 && sources.every(id => { const raw = repos.getRawMessage(id); return raw && raw.deletedAtMs === null && repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', raw.conversationId)?.principal_id === binding.principalId })
+    return sources.length > 0 && sources.every(id => { const raw = repos.getRawMessage(id); return raw && isHumanMessage(raw) && repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', raw.conversationId)?.principal_id === binding.principalId })
   }).map(row => ({ id: String(row['id']), kind: String(row['kind']), value: JSON.parse(String(row['value_json'])) as string, sources: JSON.parse(String(row['source_ids_json'])) as string[], status: String(row['status']) }))
 }
 export function revokeDerivedSources(repos: Repositories, deletedIds: readonly string[]): void {

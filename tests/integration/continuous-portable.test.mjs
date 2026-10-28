@@ -10,7 +10,7 @@ import {updatePanelSettings,loadPanelSettings} from '../../lib/panel/settings.js
 import {deleteScope} from '../../lib/storage/deletion.js'
 import {doctorConfig} from '../../scripts/doctor-config.mjs'
 function transfer(a,b,name){const file=join(a.directory,name);exportPortable(a.db,a.config,file,{includePlugin:false});const {payload,checksum}=readPortable(file);importPortable(b.db,b.config,payload,checksum);return payload}
-test('SYNC01 v4 replays emotion and responses on another instance, synchronizes parameters, excludes images and honors deletion',()=>{
+test('SYNC01 v5 replays emotion and responses on another instance, synchronizes parameters, excludes images and honors deletion',()=>{
  const a=fixture(),b=fixture();a.config=structuredClone(a.config);b.config=structuredClone(b.config)
  try{
   const owner=new OwnerIdentity(a.repos,a.config),binding=owner.binding('dsh','one')
@@ -19,7 +19,7 @@ test('SYNC01 v4 replays emotion and responses on another instance, synchronizes 
   updatePanelSettings(a.repos,a.config,{emotion:{contactTauHours:9},perception:{allowedApplications:['private-app']}},true,binding.principalId)
   a.repos.setSetting('local.perception.observation:secret',JSON.stringify({image:'private-image'}),a.now())
   const payload=transfer(a,b,'new.json');loadPanelSettings(b.repos,b.config)
-  assert.equal(payload.version,4);assert.ok(!JSON.stringify(payload).includes('private-image'));assert.ok(!JSON.stringify(payload).includes('private-app'))
+  assert.equal(payload.version,5);assert.ok(!JSON.stringify(payload).includes('private-image'));assert.ok(!JSON.stringify(payload).includes('private-app'))
   assert.deepEqual(continuousAffect(b.repos,b.config,binding.principalId,b.now()),continuousAffect(a.repos,a.config,binding.principalId,a.now()))
   assert.equal(b.db.get("SELECT COUNT(*) n FROM response_events WHERE source_message_id='transfer-emotion'").n,1)
   deleteScope(a.db,a.repos,binding.principalId,{kind:'message',messageId:raw.id},a.now(),7,a.config)

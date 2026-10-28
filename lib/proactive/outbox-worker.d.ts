@@ -58,6 +58,7 @@ export declare class OutboxWorker {
     private readonly options;
     private readonly now;
     private running;
+    get busy(): boolean;
     constructor(options: OutboxWorkerOptions);
     /**
      * 取一批待发消息并逐条投递。

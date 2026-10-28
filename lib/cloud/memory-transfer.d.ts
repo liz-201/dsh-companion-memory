@@ -30,6 +30,9 @@ export interface TransferStatus {
     error: string | null;
     foreignLibraries: ForeignLibrary[];
     notice: string | null;
+    localStateHash?: string | null;
+    uploadedStateHash?: string | null;
+    snapshotUploaded?: boolean;
 }
 export interface LibraryManifestFile {
     path: string;

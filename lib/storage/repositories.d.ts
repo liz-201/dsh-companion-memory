@@ -272,7 +272,7 @@ export declare class Repositories {
     /** 日限额与冷却：某会话在 [sinceMs, now] 内已发/在途的主动消息数。 */
     countOutboxSince(conversationId: string, sinceMs: number): number;
     /** 有过期未确认的主动消息（用于「未回复就暂停」判定，§14.2）。 */
-    unresolvedOutbox(conversationId: string, sinceMs: number): Row[];
+    unresolvedOutbox(conversationId: string, sinceMs: number, unknownSinceMs?: number): Row[];
     currentCheckpoint(conversationId: string): Row | undefined;
     putCheckpoint(input: {
         id: string;

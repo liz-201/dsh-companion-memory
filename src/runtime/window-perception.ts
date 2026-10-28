@@ -53,6 +53,7 @@ export class WindowPerception {
     }
   }
   stop():void {
+    this.revision=''
     this.generation++;this.controller?.abort();this.controller=null
     if(this.timer)clearInterval(this.timer)
     this.timer=null;this.selected.clear();this.stable=null;this.recent=[];this.fingerprints.clear()

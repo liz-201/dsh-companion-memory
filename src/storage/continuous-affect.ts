@@ -7,35 +7,33 @@ import { classifyOcc, type EmotionComponent } from '../domain/occ-classifier.js'
 import { projectDrives, respondDrive, type DriveState } from '../domain/drive-projector.js'
 import { projectPad, type TimedComponents } from '../domain/pad-projector.js'
 import { matchSourceQuote } from '../memory/quote-match.js'
+import type { ContinuousAffectState } from '../domain/continuous-affect.js'
+import { humanSourceSql, isHumanMessage } from '../memory/source-policy.js'
+import { qualifiedOwnerPull } from '../domain/relationship-evidence.js'
+import { projectRelationshipDynamics, type RelationshipDynamicsEvent } from '../domain/relationship-dynamics.js'
+export type { ContinuousAffectState } from '../domain/continuous-affect.js'
 
-export interface ContinuousAffectState {
-  version: 'continuous-v1'
-  parameterVersion: string
-  drives: DriveState
-  pad: ReturnType<typeof projectPad>
-  emotions: EmotionComponent[]
-  displays: string[]
-  evidenceIds: string[]
-  appraisalCount: number
-}
 interface Source { id: string; at: number }
 interface StoredAppraisal { id: string; vector: EmotionAppraisal; at: number; sourceId: string }
-const cache = new WeakMap<Repositories, Map<string, { stamp: string; responses: Source[]; appraisals: StoredAppraisal[] }>>()
+const cache = new WeakMap<Repositories, Map<string, { stamp: string; responses: Source[]; appraisals: StoredAppraisal[]; relations: RelationshipDynamicsEvent[] }>>()
 
 /** Host binds all identities and quotes; model references are restricted to the supplied owner history. */
 export function saveEmotionAppraisals(repos: Repositories, binding: IdentityBinding, message: RawMessage, candidates: unknown, producer = 'background'): number {
   const rows = parseAppraisals(candidates)
   return repos.db.transaction(() => {
     const owner = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', message.conversationId)
-    if (owner?.principal_id !== binding.principalId || message.conversationId!==binding.conversationId || message.role !== 'user' || repos.getRawMessage(message.id)?.deletedAtMs !== null || repos.getRawMessage(message.id)?.content!==message.content) throw Error('Invalid emotion source owner')
+    if (owner?.principal_id !== binding.principalId || message.conversationId!==binding.conversationId || !isHumanMessage(message) || repos.getRawMessage(message.id)?.deletedAtMs !== null || repos.getRawMessage(message.id)?.content!==message.content) throw Error('Invalid emotion source owner')
     const valid = rows.map(vector => {
       const quote = matchSourceQuote(message.content, vector.quote)
       if (!quote) throw Error('Emotion quote is not present in source message')
       if (vector.suppliedEvidenceRef) {
-        const prior = repos.db.get<{ vector_json: string; event_time_ms: number }>("SELECT a.vector_json,a.event_time_ms FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id WHERE a.id=? AND a.principal_id=? AND a.status='active' AND r.deleted_at_ms IS NULL", vector.suppliedEvidenceRef, binding.principalId)
+        const prior = repos.db.get<{ vector_json: string; event_time_ms: number }>(`SELECT a.vector_json,a.event_time_ms FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id WHERE a.id=? AND a.principal_id=? AND a.status='active' AND ${humanSourceSql('r')}`, vector.suppliedEvidenceRef, binding.principalId)
         if (!prior || prior.event_time_ms >= message.occurredAtMs || JSON.parse(prior.vector_json).prospect !== 'pending') throw Error('Invalid prior expectation reference')
       }
       const qualified={...vector,quote}
+      const pull = qualifiedOwnerPull(qualified, message.content, binding.conversationKind === 'private')
+      if (pull === undefined) delete qualified.pull
+      else qualified.pull = pull
       if(vector.agency==='self'&&vector.focus==='action'){
         if(!vector.suppliedBehaviorRef){delete qualified.praiseworthiness;qualified.agency='unknown'}
         else{
@@ -111,7 +109,7 @@ export function retractEmotionAppraisal(repos:Repositories,id:string,principalId
 }
 
 export function priorExpectations(repos: Repositories, principalId: string, beforeMs: number): { id: string; quote: string; desirability?: number }[] {
-  return repos.db.all<{ id: string; evidence_quote: string; vector_json: string }>("SELECT a.id,a.evidence_quote,a.vector_json FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id WHERE a.principal_id=? AND a.status='active' AND a.event_time_ms<? AND r.deleted_at_ms IS NULL AND json_extract(a.vector_json,'$.prospect')='pending' ORDER BY a.event_time_ms DESC LIMIT 8",principalId,beforeMs)
+  return repos.db.all<{ id: string; evidence_quote: string; vector_json: string }>(`SELECT a.id,a.evidence_quote,a.vector_json FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id WHERE a.principal_id=? AND a.status='active' AND a.event_time_ms<? AND ${humanSourceSql('r')} AND json_extract(a.vector_json,'$.prospect')='pending' ORDER BY a.event_time_ms DESC LIMIT 8`,principalId,beforeMs)
     .map(row => ({ id: row.id,quote: row.evidence_quote,desirability: (JSON.parse(row.vector_json) as EmotionAppraisal).desirability }))
 }
 
@@ -128,11 +126,32 @@ export function continuousAffect(repos: Repositories, config: Config, principalI
   if (!owners) { owners = new Map(); cache.set(repos,owners) }
   let history = owners.get(principalId)
   if (!history || history.stamp !== stamp) {
-    const responses = repos.db.all<{ id: string; event_time_ms: number }>("SELECT e.source_message_id AS id,e.event_time_ms FROM response_events e JOIN raw_messages r ON r.id=e.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND e.status='active' AND r.deleted_at_ms IS NULL ORDER BY e.event_time_ms,e.source_message_id",principalId).map(row=>({id:row.id,at:row.event_time_ms}))
-    const appraisals = repos.db.all<{ id: string; vector_json: string; event_time_ms: number; source_message_id: string }>("SELECT a.id,a.vector_json,a.event_time_ms,a.source_message_id FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND a.principal_id=? AND a.status='active' AND r.deleted_at_ms IS NULL ORDER BY a.event_time_ms,a.source_message_id,a.slot",principalId,principalId)
+    const responses = repos.db.all<{ id: string; event_time_ms: number }>(`SELECT e.source_message_id AS id,e.event_time_ms FROM response_events e JOIN raw_messages r ON r.id=e.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND e.status='active' AND ${humanSourceSql('r')} ORDER BY e.event_time_ms,e.source_message_id`,principalId).map(row=>({id:row.id,at:row.event_time_ms}))
+    const appraisals = repos.db.all<{ id: string; vector_json: string; event_time_ms: number; source_message_id: string }>(`SELECT a.id,a.vector_json,a.event_time_ms,a.source_message_id FROM emotion_appraisals a JOIN raw_messages r ON r.id=a.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND a.principal_id=? AND a.status='active' AND ${humanSourceSql('r')} ORDER BY a.event_time_ms,a.source_message_id,a.slot`,principalId,principalId)
       // Vectors are strictly validated on extraction/import; reads only decode the authoritative rows.
       .map(row=>({id:row.id,vector:JSON.parse(row.vector_json) as EmotionAppraisal,at:row.event_time_ms,sourceId:row.source_message_id}))
-    history = {stamp,responses,appraisals}; owners.set(principalId,history)
+    const relationRows = repos.db.all<{ source_id: string; at_ms: number; delta_json: string | null }>(`SELECT r.id AS source_id,r.occurred_at_ms AS at_ms,json_extract(e.payload_json,'$.relationshipDelta') AS delta_json FROM affect_events e JOIN appraisals a ON a.id=e.appraisal_id JOIN raw_messages r ON r.id=a.source_message_id JOIN conversations c ON c.id=r.conversation_id WHERE e.principal_id=? AND c.principal_id=? AND e.status='active' AND ${humanSourceSql('r')} ORDER BY r.occurred_at_ms,r.id,e.seq`,principalId,principalId)
+    const grouped = new Map<string,RelationshipDynamicsEvent>()
+    for (const row of relationRows) {
+      if (!row.delta_json) continue
+      const delta = JSON.parse(row.delta_json) as Record<string,number>
+      const amount = (delta['affection']??0)+(delta['trust']??0)*.5+(delta['respect']??0)*.25-(delta['grievance']??0)
+      if (!Number.isFinite(amount)) continue
+      const event = grouped.get(row.source_id) ?? {sourceId:row.source_id,atMs:row.at_ms,intimacyDelta:0}
+      event.intimacyDelta = Math.max(-1,Math.min(1,(event.intimacyDelta??0)+amount))
+      grouped.set(row.source_id,event)
+    }
+    for (const item of appraisals) {
+      const source = repos.getRawMessage(item.sourceId)
+      const kind = source ? repos.db.get<{kind:string}>('SELECT kind FROM conversations WHERE id=?',source.conversationId)?.kind : undefined
+      const pull = source ? qualifiedOwnerPull(item.vector,source.content,kind==='private') : undefined
+      if (pull === undefined) continue
+      const event = grouped.get(item.sourceId) ?? {sourceId:item.sourceId,atMs:item.at}
+      // One original message is one motivation input, even with several appraisal slots.
+      event.pull = pull < 0 || (event.pull??0) >= 0 ? (pull < 0 ? Math.min(event.pull??0,pull) : Math.max(event.pull??0,pull)) : event.pull
+      grouped.set(item.sourceId,event)
+    }
+    history = {stamp,responses,appraisals,relations:[...grouped.values()]}; owners.set(principalId,history)
     if (owners.size > 1000) owners.delete(owners.keys().next().value!)
   }
   const parameters = {contactTauHours:config.emotion.contactTauHours,responseRelief:config.emotion.responseRelief,cap:1}
@@ -150,5 +169,5 @@ export function continuousAffect(repos: Repositories, config: Config, principalI
     if(result.components.some(c=>c.intensity*decay>=.12)) { for(const label of result.displays)displays.add(label);evidenceIds.add(item.sourceId) }
     if((item.vector.appealingness??0)>.3 && decay>.1)drives.exploration=Math.min(1,drives.exploration+.1*decay)
   }
-  return {version:'continuous-v1',parameterVersion:version,drives,pad:projectPad(timed,nowMs,config.emotion.componentHalfLifeMinutes,config.emotion.moodHalfLifeMinutes),emotions:[...emotions].filter(([,v])=>v>=.05).map(([category,intensity])=>({category:category as EmotionComponent['category'],intensity})).sort((a,b)=>b.intensity-a.intensity).slice(0,6),displays:[...displays].slice(0,3),evidenceIds:[...evidenceIds].slice(-10),appraisalCount:history.appraisals.length}
+  return {version:'continuous-v1',parameterVersion:version,drives,pad:projectPad(timed,nowMs,config.emotion.componentHalfLifeMinutes,config.emotion.moodHalfLifeMinutes),emotions:[...emotions].filter(([,v])=>v>=.05).map(([category,intensity])=>({category:category as EmotionComponent['category'],intensity})).sort((a,b)=>b.intensity-a.intensity).slice(0,6),displays:[...displays].slice(0,3),evidenceIds:[...evidenceIds].slice(-10),appraisalCount:history.appraisals.filter(item=>item.at<=nowMs).length,relationship:projectRelationshipDynamics(history.relations,nowMs,{intimacyGain:1})}
 }

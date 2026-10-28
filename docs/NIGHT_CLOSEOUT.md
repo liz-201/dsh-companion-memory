@@ -61,12 +61,14 @@
 
 ## 顺序及成功依据
 
-1. 导出本地完整记忆，必须返回 `upload: queued`，确保自动上传确实开启。
-2. 调用受保护的 DSH 同步 API，等待 `busy=false`、`ready=true`、无错误且 `lastSyncAtMs` 不早于本次导出。令牌与 Cookie 只在内存中使用。云端依据是现有 `MemoryTransfer.runSync` 的上传元数据、下载 SHA256 校验以及已校验快照的指纹复用；工具不另行重复读取凭据或独立下载网盘正文。
-3. Git 目标必须仍是 `liz-201/dsh-companion-memory` 的 `origin/main`。先 fetch，再证明远端是已签收 commit 的祖先，仅推送该 commit，不使用 force，不自动创建提交，最后通过 `ls-remote` 核对远端 SHA。
-4. 等待可取消的 60 秒，重新核对授权、签收和工作树，再补一次记忆同步，接住推送／等待期间完成的整理或对端更新；最后核对会话状态和远端，再执行 `shutdown.exe /s /t 0`，不加 `/f`。**不能改成 `/t 60`**：Windows 的非零 `/t` 会隐含 `/f`，可能丢失未保存内容。[微软命令说明](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/shutdown)
+1. 先调用同一令牌保护的 `POST /companion-memory/api/closeout-pause`，确认 `paused=true`、`drained=true`，且 `activeLeases/foreground/pending` 均为零。插件停止新的处理入口并等待实际在途任务；HTTP 面板变更请求另有准入计数，已经开始的异步修改结束前不会宣称排空。暂停后拒绝导入、授权、合并和面板变更，仍允许导出、同步、状态检查及显式恢复。旧插件没有该端点时阻止收尾，不能用“会话已空闲”替代。
+2. 导出本地完整记忆，必须返回 `upload: queued`，再调用受保护的 DSH 同步 API，等待 `busy=false`、`ready=true`、无错误且 `lastSyncAtMs` 不早于本次导出。必须有 `snapshotUploaded=true`，且 `localStateHash` 与 `uploadedStateHash` 是相同的 64 位 SHA256；随后重读 `closeout-status`，确认仍暂停且排空。上传期间出现变更会使证明失效，直至后续上传完成。令牌与 Cookie 只在内存中使用。云端依据是现有 `MemoryTransfer.runSync` 的上传元数据、下载 SHA256 校验以及当前可迁移内容与已校验上传指纹的比较；工具不另行复制凭据或独立下载网盘正文。
+3. Git 目标必须仍是 `liz-201/dsh-companion-memory` 的 `origin/main`。检查展开后的全部 fetch/push URL，拒绝多个目的地或其他仓库；对已检查的准确地址先 fetch，再证明远端是已签收 commit 的祖先，仅推送该 commit，不使用 force、不附带标签、不自动创建提交，最后通过同一推送地址的 `ls-remote` 核对远端 SHA。不能只校验 `get-url` 的首条结果后执行 `push origin`：Git 会推送全部 push URL，而 fetch 只使用第一条。[Git remote](https://git-scm.com/docs/git-remote#get-url)、[Git push 的远端规则](https://git-scm.com/docs/git-push#REMOTES)
+4. 等待可取消的 60 秒，重新核对授权、签收和工作树，再补一次记忆同步，接住推送／等待期间的对端更新；最后核对会话、远端、实际暂停状态与当前上传指纹，再执行 `shutdown.exe /s /t 0`，不加 `/f`。**不能改成 `/t 60`**：Windows 的非零 `/t` 会隐含 `/f`，可能丢失未保存内容。[微软命令说明](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/shutdown)
 
-同步或 Git 任一步失败都不关机；状态只记录稳定错误码，不写原始服务响应、凭据或对话。`shutdown-requested` 仅表示 Windows 接受了非强制关机请求，不是主机已关机的独立证明；应用仍可能阻止关机。重复运行同一已请求关机的夜晚不会再次请求。命令发出前先记录 `shutdown-requesting`；若结果丢失或失败，重新运行会报告结果未知并停止，不盲目再次发出系统请求。
+同步或 Git 任一步失败都不关机；已暂停的插件保持暂停，不会静默恢复写入。协调者可查看受保护的 `GET /companion-memory/api/closeout-status`，排查后重试；如果改为继续使用插件，显式调用 `POST /companion-memory/api/closeout-resume` 恢复。状态只记录稳定错误码，不写原始服务响应、凭据或对话。
+
+`shutdown-requested` 仅表示 Windows 接受了非强制关机请求，不是主机已关机的独立证明；应用仍可能阻止关机。重复运行同一已请求关机的夜晚不会再次请求。命令发出前先持久化 `shutdown-requesting` 与 `shutdownAttemptedAtMs` 预留标记；后续保存最终成功状态失败也必须保留该标记。任何同夜预留标记使重新运行报告结果未知并停止，不盲目再次发出系统请求；即使预留写入失败而实际未发出命令，也采用保守阻止重试，由协调者核对后处理。
 
 ## 运行
 

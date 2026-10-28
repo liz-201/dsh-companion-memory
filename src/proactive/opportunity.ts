@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Repositories } from '../storage/repositories.js'
 import type { IdentityBinding, RawMessage } from '../domain/types.js'
 import { computerEvidence } from './computer-evidence.js'
+import { isHumanMessage } from '../memory/source-policy.js'
 
 export type OpportunityKind = 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'repair' | 'reminder' | 'computer_event'
 export function opportunityScore(scores: Record<string, number>): number {
@@ -11,7 +12,7 @@ export function addOpportunity(repos: Repositories, input: { binding: IdentityBi
   if (!input.sourceIds.length || input.summary.length > 2000 || input.expiresAtMs <= input.notBeforeMs) throw new Error('Invalid opportunity evidence or window')
   for (const id of input.sourceIds) {
     const message = repos.getRawMessage(id), memory = repos.getMemory(id)
-    if (!(message && message.deletedAtMs === null && message.role === 'user' && message.conversationId === input.binding.conversationId) && !(memory && memory.principal_id === input.binding.principalId && memory.status === 'active' && memory.visibility === input.binding.visibility) && !computerEvidence(repos, id, input.binding.principalId, input.binding.conversationId, input.nowMs)) throw new Error('Opportunity evidence is deleted or outside scope')
+    if (!(message && isHumanMessage(message) && message.conversationId === input.binding.conversationId) && !(memory && memory.principal_id === input.binding.principalId && memory.status === 'active' && memory.visibility === input.binding.visibility) && !computerEvidence(repos, id, input.binding.principalId, input.binding.conversationId, input.nowMs)) throw new Error('Opportunity evidence is deleted or outside scope')
   }
   const topic = createHash('sha256').update(`${input.kind}:${[...input.sourceIds].sort().join(':')}:${input.topicRevision ?? ''}`).digest('hex')
   const id = `op:${input.kind}:${input.binding.principalId}:${topic}`
@@ -20,7 +21,7 @@ export function addOpportunity(repos: Repositories, input: { binding: IdentityBi
 }
 /** Deterministic explicit follow-up cues only; nothing is inferred from mere silence. */
 export function observeOpportunity(repos: Repositories, binding: IdentityBinding, message: RawMessage): void {
-  if (message.role !== 'user' || message.deletedAtMs !== null || /比如|台词|假如|[“「]/.test(message.content)) return
+  if (!isHumanMessage(message) || /比如|台词|假如|[“「]/.test(message.content)) return
   const text = message.content
   if (/(?:明天|待会|一会|稍后|今天).{0,25}(?:面试|考试|比赛|发布|演出|看结果)/.test(text)) {
     const delay = text.includes('明天') ? 30 * 60 * 60_000 : 3 * 60 * 60_000

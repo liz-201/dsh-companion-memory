@@ -60,6 +60,7 @@ export declare class ProactiveScheduler {
     private scanning;
     constructor(options: SchedulerOptions);
     get running(): boolean;
+    get busy(): boolean;
     /** 启动周期扫描；重复调用不会产生第二个 timer（热重载安全）。 */
     start(): void;
     stop(): void;
