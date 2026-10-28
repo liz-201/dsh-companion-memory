@@ -55,7 +55,8 @@ export function classifyOcc(a: EmotionAppraisal, prior?: EmotionAppraisal): Clas
   if ((a.relationshipThreat ?? 0) >= .75 && negative(d)) displays.push('吃味')
   if ((a.personalAttention ?? 0) >= .7 && labels.has('gratitude')) displays.push('被重视感')
   if (labels.has('relief')) displays.push('安心')
-  if (labels.has('disappointment') || labels.has('distress')) displays.push('失落')
+  // 失落 needs a failed positive expectation; plain distress carries no goal-frustration evidence yet.
+  if (labels.has('disappointment')) displays.push('失落')
   const magnitude = Math.max(...[d,a.praiseworthiness,a.appealingness,a.desirabilityForOther,prior?.desirability].filter((n): n is number => n !== undefined).map(Math.abs), .15)
   return { components: [...labels].map(category => ({ category, intensity: Math.min(1, magnitude * a.confidence * (a.relevance ?? .7)) })), displays, reasons }
 }
