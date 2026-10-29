@@ -45,7 +45,7 @@ test('real Cordis attaches memory management when webServer arrives late and rea
     const rows = []; ctx.emit('webserver/index-inject', rows)
     assert.equal(rows.filter(row => row.html?.includes('companion-panel-entry')).length, 1)
     const response = await fetch(`${origin}/companion-memory`), diagnostic = await response.json()
-    assert.equal(diagnostic.status.version, '0.3.0-dev.10')
+    assert.equal(diagnostic.status.version, '0.3.0-dev.11')
     assert.equal(diagnostic.status.sync.manageUrl, `${origin}/companion-memory/manage`)
     await provider.dispose(); provider = undefined
     assert.equal(routes.size, 0)

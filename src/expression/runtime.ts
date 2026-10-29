@@ -12,6 +12,7 @@ import { activeHabits } from '../memory/habit-learning.js'
 import { continuousAffect } from '../storage/continuous-affect.js'
 import { humanSourceSql } from '../memory/source-policy.js'
 import { continuousMood } from '../domain/continuous-mood.js'
+import { regulateExpression } from './regulation.js'
 
 export class ExpressionRuntime {
   private plans = new Map<string, ExpressionPlan>()
@@ -38,9 +39,10 @@ export class ExpressionRuntime {
       if (continuous.drives.load > .7) plan.playfulness = Math.min(plan.playfulness,.3)
       plan.reasonCodes.push('continuous-v1',...continuous.emotions.slice(0,2).map(e=>`emotion:${e.category}`))
     }
-    this.plans.set(state.principalId, plan)
+    const regulated = regulateExpression(plan)
+    this.plans.set(state.principalId, regulated)
     if (this.plans.size > 1000) this.plans.delete(this.plans.keys().next().value!)
-    return plan
+    return regulated
   }
 
   private contactExposure(principalId: string, nowMs: number): { messages: number; days: number } {

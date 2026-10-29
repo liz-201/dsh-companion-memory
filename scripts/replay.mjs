@@ -142,7 +142,8 @@ for (let index = 0; index < turns; index += 1) {
       platformMessageKey: `replay-${index}`,
       occurredAtMs: T0 + index * 1000,
       observedAtMs: T0 + index * 1000,
-      sourceKind: 'replay',
+      // Exercise the real human QQ ingress; model usage remains labelled replay.
+      sourceKind: 'qq',
       sessionId: 'session-replay',
     })
   } catch (error) {

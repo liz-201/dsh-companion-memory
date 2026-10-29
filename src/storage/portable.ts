@@ -17,6 +17,7 @@ import { sharedOwnerPrincipal, unifyOwnerState } from './shared-owner.js'
 import { parseAppraisals } from '../domain/emotion-appraisal.js'
 import { matchSourceQuote } from '../memory/quote-match.js'
 import { retractEmotionAppraisal } from './continuous-affect.js'
+import { humanSourceSql } from '../memory/source-policy.js'
 
 const TABLES: Record<string, readonly string[]> = {
   companions: ['id'], principals: ['id'], conversations: ['id'], identity_links: ['namespace', 'external_key'], owner_channels: ['conversation_id'],
@@ -467,7 +468,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
     }
     // SQLite row sequences are local to each database, never portable references.
     db.run("DELETE FROM plugin_settings WHERE key LIKE 'emotion.observed:%' AND EXISTS(SELECT 1 FROM raw_messages WHERE id=substr(plugin_settings.key,18) AND deleted_at_ms IS NOT NULL)")
-    db.run("UPDATE conversations SET latest_inbound_seq = COALESCE((SELECT MAX(seq) FROM raw_messages WHERE conversation_id = conversations.id AND role = 'user'), 0)")
+    db.run(`UPDATE conversations SET latest_inbound_seq = COALESCE((SELECT MAX(r.seq) FROM raw_messages r WHERE r.conversation_id = conversations.id AND ${humanSourceSql('r')}), 0)`)
     if (!repos.getSetting('local.device-id')) repos.setSetting('local.device-id', randomUUID(), nowMs)
     // Tombstones override a stale copy's facts, including after a three-way branch merge.
     for (const tombstone of db.all<{ affected_ids_json: string; selector_json: string; principal_id: string }>('SELECT affected_ids_json, selector_json, principal_id FROM deletion_tombstones')) {

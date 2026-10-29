@@ -184,11 +184,11 @@ test('装配 → 入站 → 落库 → 卸载', async () => {
     const service = host.provided.get('companionMemory')
     assert.equal(typeof service.handleInbound, 'function')
     assert.equal(typeof service.handleCommand, 'function')
-    assert.equal(service.version, '0.3.0-dev.10')
+    assert.equal(service.version, '0.3.0-dev.11')
 
     // 状态：还没入站时也能回答
     const status = service.status()
-    assert.equal(status.version, '0.3.0-dev.10')
+    assert.equal(status.version, '0.3.0-dev.11')
     assert.equal(status.companion.id, 'dafeiyu')
     assert.ok(status.database.endsWith('.sqlite3'))
 
