@@ -11,7 +11,8 @@
  * 任何一条不满足就整体返回空候选，不做「凑一条」。
  *
  * 排序（§14.2）：话题相关度 → 未结程度 → 关系状态 → 主动性 → 打扰成本。
- * 明确提醒永远先于闲聊；闲聊不因「久没说话」自动升级为必须发送。
+ * 明确提醒永远先于闲聊；「久没说话」只在 idleTalkMinutes 之后产生一条闲聊候选，
+ * 仍然要过全部硬闸门（静默时段、日限额、冷却、未回复暂停），不是必须发送。
  */
 import type { Config } from '../config.js';
 import type { Repositories } from '../storage/repositories.js';

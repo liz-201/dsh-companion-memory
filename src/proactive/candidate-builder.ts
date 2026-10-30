@@ -11,7 +11,8 @@
  * 任何一条不满足就整体返回空候选，不做「凑一条」。
  *
  * 排序（§14.2）：话题相关度 → 未结程度 → 关系状态 → 主动性 → 打扰成本。
- * 明确提醒永远先于闲聊；闲聊不因「久没说话」自动升级为必须发送。
+ * 明确提醒永远先于闲聊；「久没说话」只在 idleTalkMinutes 之后产生一条闲聊候选，
+ * 仍然要过全部硬闸门（静默时段、日限额、冷却、未回复暂停），不是必须发送。
  */
 import type { Config } from '../config.js'
 import type { TaskKind } from '../domain/types.js'
@@ -261,6 +262,50 @@ function smallTalkCandidate(input: CandidateInput): Candidate[] {
     }).filter(candidate => opportunityScore(candidate.scores) >= input.config.proactive.opportunityThreshold)
 }
 
+/**
+ * 隔了足够久没说话时主动开口（§14.2 闲聊）。
+ *
+ * 只认「真实的上一句用户原文」作锚点：不编造事件、不假装有新进展。
+ * 每一个空闲窗口最多一条（key 带窗口序号），跨窗口才会再次候选。
+ */
+function idleTalkCandidate(input: CandidateInput): Candidate[] {
+    const { repos, conversationId, nowMs, config } = input
+    const idleMinutes = config.proactive.idleTalkMinutes
+    if (!(idleMinutes > 0)) return []
+    const last = repos.db.get<{ seq: number; content: string; occurred_at_ms: number }>(
+        "SELECT seq, content, occurred_at_ms FROM raw_messages WHERE conversation_id = ? AND role = 'user' AND deleted_at_ms IS NULL ORDER BY seq DESC LIMIT 1",
+        conversationId,
+    )
+    if (last === undefined) return []
+    const at = Number(last.occurred_at_ms)
+    if (!Number.isFinite(at)) return []
+    const idleMs = idleMinutes * 60_000
+    const elapsed = nowMs - at
+    if (elapsed < idleMs) return []
+    const anchor = String(last.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 200)
+    if (anchor === '') return []
+    const state = repos.getSnapshot(input.principalId)?.snapshot
+    const scores: Record<string, number> = {
+        relevance: .55,
+        openness: .5,
+        interruption: .3,
+        acceptance: topicAcceptance(repos, input.principalId, 'small_talk', nowMs, config.proactive.timezone),
+    }
+    if (state) {
+        scores['initiative'] = state.personality.initiative
+        scores['willingness'] = Math.max(0, Math.min(1, .5 + state.mood.joy * .3 - state.mood.tension * .4 - state.mood.hurt * .4))
+    }
+    return [{
+        key: `small_talk:${conversationId}:${String(last.seq)}:${String(Math.floor(elapsed / idleMs))}`,
+        kind: 'small_talk',
+        topic: `你上次最后说：「${anchor}」。隔了一段时间，可以自然开口接一句：可以提这件具体的事，也可以只是打个招呼；不要编造新发生的事情，不要追问个没完。`,
+        taskId: null,
+        scores,
+        reasons: [`距上一句已 ${String(Math.floor(elapsed / 60_000))} 分钟没有新消息`],
+        mustSendByMs: null,
+    }]
+}
+
 /** 排序权重（§14.2 顺序）：相关度 > 未结 > 关系 > 主动性 > 打扰成本（负向）。 */
 export function rankScore(candidate: Candidate): number {
     const s = candidate.scores
@@ -291,6 +336,7 @@ export function buildCandidates(input: CandidateInput): CandidateResult {
         ...openTopicCandidates(input),
         ...repairCandidate(input),
         ...smallTalkCandidate(input),
+        ...idleTalkCandidate(input),
     ]
     all.sort((a, b) => {
         if (a.kind === 'reminder' || b.kind === 'reminder') return a.kind === b.kind ? 0 : a.kind === 'reminder' ? -1 : 1

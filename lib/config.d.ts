@@ -64,6 +64,8 @@ export interface ProactiveConfig {
     spontaneousLimitPerDay: number;
     spontaneousMinGapMinutes: number;
     pauseAfterUnanswered: number;
+    /** 隔多少分钟没有新消息才允许主动开口（0 表示关闭这条路径）。 */
+    idleTalkMinutes: number;
     maxGenerationCallsPerCandidate: number;
 }
 export interface ComputerEventsConfig {

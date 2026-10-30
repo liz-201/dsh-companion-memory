@@ -74,6 +74,8 @@ export interface ProactiveConfig {
   spontaneousLimitPerDay: number
   spontaneousMinGapMinutes: number
   pauseAfterUnanswered: number
+  /** 隔多少分钟没有新消息才允许主动开口（0 表示关闭这条路径）。 */
+  idleTalkMinutes: number
   maxGenerationCallsPerCandidate: number
 }
 
@@ -266,6 +268,7 @@ export const DEFAULT_CONFIG: Config = {
     spontaneousLimitPerDay: 2,
     spontaneousMinGapMinutes: 180,
     pauseAfterUnanswered: 1,
+    idleTalkMinutes: 150,
     maxGenerationCallsPerCandidate: 1,
   },
   computerEvents: { enabled: false, pollSeconds: 30, idleThresholdSeconds: 1200, foregroundApplications: false, resources: true, network: true, watchDirectories: [] },
@@ -581,6 +584,7 @@ export function resolveConfig(raw: unknown = {}): Config {
       spontaneousLimitPerDay: readNumber(proactive, 'spontaneousLimitPerDay', 'proactive', 2, { min: 0 }),
       spontaneousMinGapMinutes: readNumber(proactive, 'spontaneousMinGapMinutes', 'proactive', 180, { min: 0 }),
       pauseAfterUnanswered: readNumber(proactive, 'pauseAfterUnanswered', 'proactive', 1, { min: 0 }),
+      idleTalkMinutes: readNumber(proactive, 'idleTalkMinutes', 'proactive', 150, { min: 0, max: 10080 }),
       maxGenerationCallsPerCandidate: readNumber(
         proactive,
         'maxGenerationCallsPerCandidate',

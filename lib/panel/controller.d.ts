@@ -109,6 +109,7 @@ export declare class PluginPanel implements PanelControls {
             spontaneousLimitPerDay: number;
             spontaneousMinGapMinutes: number;
             pauseAfterUnanswered: number;
+            idleTalkMinutes: number;
             maxGenerationCallsPerCandidate: number;
         };
         computer: {
