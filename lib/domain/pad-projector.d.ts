@@ -10,6 +10,7 @@ export interface TimedComponents {
     atMs: number;
     components: EmotionComponent[];
     control?: number;
+    experienceTone?: readonly [number, number, number];
 }
 /** Closed-form event convolution avoids read-frequency and integration-step drift. */
 export declare function projectPad(events: readonly TimedComponents[], atMs: number, halfLifeMinutes?: number, moodHalfLifeMinutes?: number): {

@@ -171,7 +171,7 @@ export class TurnCoordinator {
   }
 
   recordObservationUsage(turnId: string, attempt: number, usage: ModelChunk['usage']): void {
-    const entry = { turnId, phase: turnId.startsWith('before-reply:')?'evaluation' as const:'background' as const, provider: usage?.provider ?? 'host', model: usage?.model ?? 'host-default',
+    const entry = { turnId, phase: /^(?:before-reply:|affect-eval:)/.test(turnId)?'evaluation' as const:'background' as const, provider: usage?.provider ?? 'host', model: usage?.model ?? 'host-default',
       inputTokens: usage?.inputTokens ?? 'unknown' as const, outputTokens: usage?.outputTokens ?? 'unknown' as const,
       cacheHitTokens: usage?.cacheHitTokens ?? 'unknown' as const, cacheMissTokens: usage?.cacheMissTokens ?? 'unknown' as const,
       reasoningTokens: usage?.reasoningTokens ?? 'unknown' as const, retry: attempt - 1, atMs: this.clock.now() }
@@ -190,12 +190,13 @@ export class TurnCoordinator {
     let timer:ReturnType<typeof setTimeout>,usage:ModelChunk['usage']
     const execute=async():Promise<void>=>{
       let output=''
-      const systemText=deps.prompts.protocol()+'\n'+EMOTION_CONTRACT
-      const input={outputContract:'<observation>{"v":2,"legacy":{"v":1,"e":[]},"appraisals":[]}</observation>',userMessage:message.content.slice(0,8000),priorExpectations:priorExpectations(deps.repos,binding.principalId,message.occurredAtMs),priorBehaviors:priorBehaviors(deps.repos,binding.principalId,message),...(previousError?{correction:previousError.slice(0,700)}:{})}
-      while(input.userMessage.length>100&&this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens)input.userMessage=input.userMessage.slice(0,Math.floor(input.userMessage.length*.8))
+      const systemText=EMOTION_CONTRACT
+      const input={outputContract:'<observation>{"v":3,"legacy":{"v":1,"e":[]},"appraisals":[]}</observation>',userMessage:message.content.slice(0,8000),recentContext:deps.repos.recentRawMessages(message.conversationId,6,message.seq).filter(row=>row.role==='assistant'||isHumanMessage(row)).map(row=>({role:row.role,text:row.content.slice(0,180)})),priorExpectations:priorExpectations(deps.repos,binding.principalId,message.occurredAtMs),priorBehaviors:priorBehaviors(deps.repos,binding.principalId,message),...(previousError?{correction:previousError.slice(0,700)}:{})}
+      while(input.recentContext.length&&this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens)input.recentContext.shift()
       while(this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens&&(input.priorBehaviors.length||input.priorExpectations.length)){
         if(input.priorBehaviors.length)input.priorBehaviors.pop();else input.priorExpectations.pop()
       }
+      while(input.userMessage.length>100&&this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens)input.userMessage=input.userMessage.slice(0,Math.floor(input.userMessage.length*.8))
       const userText=JSON.stringify(input)
       if(this.counter.count(systemText)+this.counter.count(userText)+16>deps.config.memory.inputHardLimitTokens)throw Error('Observation input budget exceeded')
       for await(const chunk of (options.callModel??deps.callModel)({turnId:id,thinking:'disabled',signal:controller.signal,systemText,userText})){

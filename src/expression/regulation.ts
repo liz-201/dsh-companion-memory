@@ -61,7 +61,7 @@ export function regulateExpression(plan: ExpressionPlan): ExpressionPlan {
   if (plan.mode === 'structured') return next
 
   const emotions = plan.continuous?.emotions
-  const anger = peak(emotions, ANGER_FAMILY)
+  const anger = plan.continuous?.ownerDirectedAnger ?? peak(emotions, ANGER_FAMILY)
   const pain = peak(emotions, PAIN_FAMILY)
   const joy = peak(emotions, JOY_FAMILY)
   const hints = relationshipHints(plan)

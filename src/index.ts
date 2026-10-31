@@ -12,6 +12,9 @@ import { WindowPerception } from './runtime/window-perception.js'
 import { continuousAffect } from './storage/continuous-affect.js'
 import { repairBridgeAffect } from './runtime/repair-bridge-affect.js'
 import { EMOTION_CONTRACT,parseObservation } from './runtime/emotion-observation.js'
+import { AFFECT_EVALUATION_CASES, scoreAffectObservation } from './runtime/affect-evaluation.js'
+import { OCC_CATEGORIES } from './domain/occ-classifier.js'
+import { EXPERIENCE_GUIDANCE } from './domain/emotion-experience.js'
 import { matchSourceQuote } from './memory/quote-match.js'
 import { observeComputerEvent } from './proactive/computer-opportunities.js'
 import { buildCandidates } from './proactive/candidate-builder.js'
@@ -138,7 +141,7 @@ export interface CompanionService {
   consumed(turnId: string): boolean
   shutdown(): Promise<void>
 }
-const VERSION = '0.3.0-dev.11'
+const VERSION = '0.3.0-dev.14'
 function logger(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {
 const prefix = '[companion]'
 if (level === 'error')
@@ -530,6 +533,7 @@ scheduler: scheduler.running,
 computer: { settings: config.computerEvents, status: computer.status() },
 perception: perception.status(),
 continuous: continuousAffect(repos,config,owner.principalId,Date.now()),
+emotionFeatures: {core:OCC_CATEGORIES,experiences:Object.keys(EXPERIENCE_GUIDANCE),causalScope:true,observationVersions:[1,2,3],humanQualityVerified:false},
 database: db.file,
 capabilities: service.compatibility().capabilities,      }
     }
@@ -673,6 +677,20 @@ if (ctx.inject) {
 // ── 定时器 ──────────────────────────────────────────────────────────────────
 let extractionProbeRunning=false
 panel = new PluginPanel({ config, db, repos, owner, computer, perception,
+  probeAffect:async (caseId,contract)=>{
+    if(extractionProbeRunning)throw Error('已有抽取验证正在进行。')
+    const scene=AFFECT_EVALUATION_CASES.find(item=>item.id===caseId)
+    if(!scene)throw Error('未知的合成情感测试场景。')
+    extractionProbeRunning=true
+    const turnId=`affect-eval:${randomUUID()}`,controller=new AbortController(),started=Date.now()
+    let timer:ReturnType<typeof setTimeout>,output='',usage:import('./runtime/turn-coordinator.js').ModelChunk['usage']
+    try{
+      const run=async()=>{for await(const chunk of modelCaller.call({turnId,thinking:'disabled',signal:controller.signal,systemText:contract??EMOTION_CONTRACT,userText:JSON.stringify({outputContract:'observation-v3',userMessage:scene.text,recentContext:'recentContext' in scene?scene.recentContext:[],priorExpectations:[],priorBehaviors:[]})})){output+=chunk.text;if(chunk.usage)usage=chunk.usage;if(output.length>16000)throw Error('诊断输出过长。')}}
+      await Promise.race([run(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('情感诊断超时。'))},config.emotion.backgroundTimeoutMs)})])
+      try { return {...scoreAffectObservation(caseId,output),elapsedMs:Date.now()-started,usage:usage??'unknown',syntheticOutput:output} }
+      catch(error) { return {caseId,passed:false,validationError:String(error instanceof Error?error.message:error).slice(0,180),elapsedMs:Date.now()-started,usage:usage??'unknown',persistedMemory:false,humanQualityVerified:false,syntheticOutput:output} }
+    }finally{clearTimeout(timer!);coordinator.recordObservationUsage(turnId,1,usage);extractionProbeRunning=false}
+  },
   probeExtraction:async()=>{
     if(extractionProbeRunning)throw Error('已有抽取验证正在进行。')
     extractionProbeRunning=true
@@ -680,7 +698,7 @@ panel = new PluginPanel({ config, db, repos, owner, computer, perception,
     const userMessage='我喜欢蓝色，请记住。谢谢你还记得这件事。'
     let output='',usage:import('./runtime/turn-coordinator.js').ModelChunk['usage'],timer:ReturnType<typeof setTimeout>
     try{
-      const run=async()=>{for await(const chunk of modelCaller.call({turnId,thinking:'disabled',signal:controller.signal,systemText:prompts.protocol()+'\n'+EMOTION_CONTRACT,userText:JSON.stringify({userMessage,priorExpectations:[],priorBehaviors:[]})})){output+=chunk.text;if(chunk.usage)usage=chunk.usage;if(output.length>16000)throw Error('抽取验证输出过长。')}}
+      const run=async()=>{for await(const chunk of modelCaller.call({turnId,thinking:'disabled',signal:controller.signal,systemText:EMOTION_CONTRACT,userText:JSON.stringify({userMessage,priorExpectations:[],priorBehaviors:[]})})){output+=chunk.text;if(chunk.usage)usage=chunk.usage;if(output.length>16000)throw Error('抽取验证输出过长。')}}
       await Promise.race([run(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error('抽取验证超时。'))},config.emotion.backgroundTimeoutMs)})])
       const parsed=parseObservation(output)
       if(parsed.appraisals?.some(a=>!matchSourceQuote(userMessage,a.quote)))throw Error('模型抽取引用未通过原文校验。')

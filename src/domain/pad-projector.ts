@@ -7,7 +7,7 @@ export const PAD_PRIORS: Record<OccCategory, readonly [number,number,number]> = 
   hate: [-.5,.3,.1], hope: [.35,.3,0], joy: [.65,.3,.15], love: [.6,.1,.1], pity: [-.35,.1,-.2], pride: [.55,.3,.4], relief: [.6,-.3,.15],
   remorse: [-.6,.15,-.35], reproach: [-.45,.35,.15], resentment: [-.45,.35,-.1], satisfaction: [.6,-.1,.25], shame: [-.6,.15,-.5],
 }
-export interface TimedComponents { atMs: number; components: EmotionComponent[]; control?: number }
+export interface TimedComponents { atMs: number; components: EmotionComponent[]; control?: number; experienceTone?: readonly [number, number, number] }
 const clamp = (n: number): number => Math.max(-1, Math.min(1, n))
 
 /** Closed-form event convolution avoids read-frequency and integration-step drift. */
@@ -19,6 +19,11 @@ export function projectPad(events: readonly TimedComponents[], atMs: number, hal
     if (event.atMs > atMs) continue
     const age = Math.max(0, atMs - event.atMs), decay = Math.exp(-k * age)
     const convolution = Math.abs(k-m) < 1e-14 ? m * age * decay : m * (Math.exp(-m*age) - decay) / (k-m)
+    // Facets provide tone only when OCC has no contribution; never award the same evidence twice.
+    if (!event.components.length && event.experienceTone) for (let axis = 0; axis < 3; axis++) {
+      fast[axis]! += event.experienceTone[axis]! * decay
+      slow[axis]! += event.experienceTone[axis]! * convolution
+    }
     // Compounds replace their base contributions to avoid counting the same appraisal twice.
     const compound = event.components.filter(c => ['anger','gratitude','gratification','remorse'].includes(c.category))
     for (const component of compound.length ? compound : event.components) {

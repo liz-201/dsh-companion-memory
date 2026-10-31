@@ -13,6 +13,7 @@ import { continuousAffect } from '../storage/continuous-affect.js'
 import { humanSourceSql } from '../memory/source-policy.js'
 import { continuousMood } from '../domain/continuous-mood.js'
 import { regulateExpression } from './regulation.js'
+import { attendAffect } from '../domain/affect-attention.js'
 
 export class ExpressionRuntime {
   private plans = new Map<string, ExpressionPlan>()
@@ -24,14 +25,14 @@ export class ExpressionRuntime {
     const profile = new PersonalityProfiles(this.repos).get(this.config.companion.id, personaId)
     const previous = this.plans.get(state.principalId)
     const exposure = this.contactExposure(state.principalId, nowMs)
-    const continuous = continuousAffect(this.repos,this.config,state.principalId,nowMs)
+    const continuous = attendAffect(continuousAffect(this.repos,this.config,state.principalId,nowMs), userText)
     const projected = projectSnapshot(state, nowMs, this.config.affect)
     const plan = projectExpression({ state: {...projected,mood:continuousMood(continuous,projected.mood)}, userText, nowMs, contactExposure: exposure, ...(profile ? { profile } : {}), ...(previous ? { previous } : {}) })
     if (continuous) {
       plan.continuous = continuous
       if (plan.mode === 'chat' && continuous.emotions.length) {
         const strongest = continuous.emotions[0]!
-        if (strongest.intensity >= .3 && ['anger','reproach'].includes(strongest.category)) plan.stance = 'firm'
+        if ((continuous.ownerDirectedAnger ?? strongest.intensity) >= .3 && ['anger','reproach'].includes(strongest.category)) plan.stance = 'firm'
         else if (strongest.intensity >= .3 && ['fear','fears-confirmed','distress','pity'].includes(strongest.category)) plan.stance = 'supportive'
         else if (strongest.intensity >= .3 && ['disappointment','shame','remorse'].includes(strongest.category)) plan.stance = 'hurt'
         else if (continuous.pad.emotion.pleasure > .3) plan.stance = 'interested'

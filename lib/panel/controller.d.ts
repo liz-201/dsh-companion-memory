@@ -14,6 +14,7 @@ export interface PanelControls {
     action(input: unknown): unknown | Promise<unknown>;
 }
 interface PanelOptions {
+    probeAffect?: (caseId: string, contract?: string) => Promise<unknown>;
     probeExtraction?: () => Promise<unknown>;
     perception?: WindowPerception;
     config: Config;

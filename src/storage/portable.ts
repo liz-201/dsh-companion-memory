@@ -37,8 +37,8 @@ type Inventory = Record<string, Record<string, string>>
 interface Checkpoint { id: string; inventory: Inventory }
 export interface PortablePayload {
   format: 'dsh-companion-transfer'
-  version: 1 | 2 | 3 | 4 | 5
-  formatVersion?: 2 | 3 | 4 | 5
+  version: 1 | 2 | 3 | 4 | 5 | 6
+  formatVersion?: 2 | 3 | 4 | 5 | 6
   minReaderVersion?: string
   id: string
   createdAtMs: number
@@ -154,17 +154,23 @@ export function exportPortable(db: Database, config: Config, file: string, optio
   const nowMs = options.nowMs ?? Date.now()
   // Earlier readers reject the independent pull appraisal field. Refuse the new
   // envelope before any old reader can partially merge it or discard evidence.
-  const version = 5
-  const payload = db.transaction((): PortablePayload => ({
-    format: 'dsh-companion-transfer', version, formatVersion: version, minReaderVersion: '0.3.0-dev.10', id, createdAtMs: nowMs, companionId: config.companion.id, ownerId,
+  const payload = db.transaction((): PortablePayload => {
+    const tables = snapshotForTransfer(db)
+    const extended = [...tables['emotion_appraisals'] ?? [], ...tables['emotion_appraisal_revisions'] ?? []].some(row => {
+      const vector = JSON.parse(String(row['vector_json'])) as Record<string, unknown>
+      return ['concern','topic','situation','unresolved'].some(key => vector[key] !== undefined)
+    })
+    const version = extended ? 6 : 5
+    return {
+    format: 'dsh-companion-transfer', version, formatVersion: version, minReaderVersion: extended ? '0.3.0-dev.14' : '0.3.0-dev.10', id, createdAtMs: nowMs, companionId: config.companion.id, ownerId,
     schema: db.all<{ version: number; checksum: string }>('SELECT version, checksum FROM schema_migrations ORDER BY version'),
     ancestors: db.all<{ id: string; inventory_json: string }>('SELECT id, inventory_json FROM portable_checkpoints ORDER BY created_at_ms DESC, rowid DESC LIMIT 8').reverse().map(row => ({ id: row.id, inventory: JSON.parse(row.inventory_json) as Inventory })),
-    tables: snapshotForTransfer(db), plugin: {},
-  }))
+    tables, plugin: {},
+  }})
   if (options.includePlugin !== false) payload.plugin = pluginFiles(options.pluginRoot ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'))
   const bytes = Buffer.from(stableJson(payload))
   if (bytes.length > MAX_BYTES) throw new Error('Transfer package exceeds the 256 MiB uncompressed limit')
-  const envelope = { format: 'dsh-companion-transfer', version, sha256: createHash('sha256').update(bytes).digest('hex'), data: gzipSync(bytes).toString('base64') }
+  const envelope = { format: 'dsh-companion-transfer', version: payload.version, sha256: createHash('sha256').update(bytes).digest('hex'), data: gzipSync(bytes).toString('base64') }
   const target = resolve(file)
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, JSON.stringify(envelope), { encoding: 'utf8', flag: 'wx', mode: 0o600 })
@@ -181,12 +187,12 @@ export function exportPortable(db: Database, config: Config, file: string, optio
 export function readPortable(file: string): { payload: PortablePayload; checksum: string } {
   if (statSync(file).size > MAX_BYTES * 2) throw new Error('Transfer file too large')
   const envelope = JSON.parse(readFileSync(file, 'utf8')) as { format?: string; version?: number; sha256?: string; data?: string }
-  if (envelope.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5].includes(Number(envelope.version)) || typeof envelope.data !== 'string' || envelope.data.length > MAX_BYTES * 2) throw new Error('Unsupported transfer package')
+  if (envelope.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6].includes(Number(envelope.version)) || typeof envelope.data !== 'string' || envelope.data.length > MAX_BYTES * 2) throw new Error('Unsupported transfer package')
   const bytes = gunzipSync(Buffer.from(envelope.data, 'base64'), { maxOutputLength: MAX_BYTES })
   const checksum = createHash('sha256').update(bytes).digest('hex')
   if (checksum !== envelope.sha256) throw new Error('Transfer checksum mismatch; no data imported')
   const payload = JSON.parse(bytes.toString('utf8')) as PortablePayload
-  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5].includes(payload.version) || payload.version !== envelope.version || typeof payload.id !== 'string' || typeof payload.ownerId !== 'string' || !payload.tables || !Array.isArray(payload.ancestors)) throw new Error('Invalid transfer payload')
+  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6].includes(payload.version) || payload.version !== envelope.version || typeof payload.id !== 'string' || typeof payload.ownerId !== 'string' || !payload.tables || !Array.isArray(payload.ancestors)) throw new Error('Invalid transfer payload')
   for (const table of Object.keys(payload.tables)) if (!Object.hasOwn(TABLES, table) || !Array.isArray(payload.tables[table])) throw new Error(`Unsupported transfer table: ${table}`)
   for (const table of Object.keys(TABLES)) if (!Array.isArray(payload.tables[table])) {
     if (payload.version === 1 && V2_TABLES.has(table) || V3_TABLES.has(table) && (payload.version < 3 || payload.version === 3 && !payload.schema.some(row => row.version >= 8))) payload.tables[table] = []
@@ -226,7 +232,7 @@ function writeRow(db: Database, table: string, row: Row, existing?: Row): void {
 }
 
 export function importPortable(db: Database, config: Config, payload: PortablePayload, checksum: string, options: { nowMs?: number; resumeReminders?: boolean; backup?: boolean; recordedTombstones?: boolean } = {}): ImportReport {
-  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5].includes(payload.version)) throw new Error('Unsupported transfer package version')
+  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6].includes(payload.version)) throw new Error('Unsupported transfer package version')
   const nowMs = options.nowMs ?? Date.now()
   const repos = new Repositories(db)
   const report: ImportReport = { inserted: 0, updated: 0, deleted: 0, conflicts: 0, alreadyImported: false, backup: null, pausedTasks: 0, lineageMissing: false }

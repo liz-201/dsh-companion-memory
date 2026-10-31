@@ -1,5 +1,7 @@
 # dsh-companion-memory
 
+> **0.3.0-dev.14**：新增有证据的细分情感体验、情绪对象隔离和混合表达，补齐观察器、保存、回放及桌面／QQ／主动表达接线。新字段随 portable v6 同步，两台电脑需使用 dev.14；旧文件继续可读。真实模型诊断与效果边界见[情感覆盖说明](docs/HUMAN_AFFECT_DEV14.md)。
+
 可选：[Codex 与 DSH Desktop 直接协作桥接](docs/CODEX_BRIDGE.md)，通过本机 API 交换开发任务和结果。
 
 > **0.3.0-dev.9**：整合两台电脑的版本，保留迁移 008、连续情感评价、回应记录和修订历史，同时保留首次配对、旧记忆 ID 与删除保护。已是同一主人时直接双向同步，无需再配对身份。新导出使用 v4，两台均需升级到兼容版；旧 v1/v2 和两种 v3 包仍可读取。详见[双设备同步](docs/CLOUD_MEMORY_SYNC.md)和[整合验证](docs/SCHEMA8_SYNC_VALIDATION.md)。

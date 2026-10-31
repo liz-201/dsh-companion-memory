@@ -22,6 +22,7 @@ import { humanSourceSql } from '../memory/source-policy.js'
 
 export interface PanelControls { snapshot(input: { conversationId?: string; query?: string }): unknown; action(input: unknown): unknown | Promise<unknown> }
 interface PanelOptions {
+  probeAffect?:(caseId:string,contract?:string)=>Promise<unknown>
   probeExtraction?:()=>Promise<unknown>
   perception?:WindowPerception
   config: Config; db: Database; repos: Repositories; owner: OwnerIdentity
@@ -88,6 +89,11 @@ export class PluginPanel implements PanelControls {
     if(action==='extract-probe'){
       if(!this.options.probeExtraction)throw new PanelInputError('当前宿主没有抽取诊断能力。')
       return this.options.probeExtraction()
+    }
+    if(action==='affect-evaluate') {
+      if(!this.options.probeAffect)throw new PanelInputError('当前宿主没有情感覆盖诊断能力。')
+      const contract = body['contract'] === undefined ? undefined : text(body['contract'],12000)
+      return this.options.probeAffect(text(body['caseId'],80),contract)
     }
     const binding = this.binding(typeof body['conversationId'] === 'string' ? body['conversationId'] : undefined)
     if(action==='emotion-retract'){
