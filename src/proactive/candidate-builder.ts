@@ -17,6 +17,7 @@ import type { Config } from '../config.js'
 import type { TaskKind } from '../domain/types.js'
 import { partsInZone, zonedToUtc } from '../domain/time-parse.js'
 import type { Repositories } from '../storage/repositories.js'
+import { UNKNOWN_DELIVERY_GRACE_MS } from '../storage/repositories.js'
 import { opportunityScore } from './opportunity.js'
 import { topicAcceptance } from './feedback.js'
 import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
@@ -145,7 +146,7 @@ export function checkGates(input: CandidateInput): GateResult {
     }
 
     // 「发出去没回」就暂停：只看主动消息，不把用户正常回复算成未回复。
-    const unresolved = repos.unresolvedOutbox(conversationId, 0)
+    const unresolved = repos.unresolvedOutbox(conversationId, 0, nowMs - UNKNOWN_DELIVERY_GRACE_MS)
     if (unresolved.length >= config.proactive.pauseAfterUnanswered) blocked.push('awaiting-reply')
 
     if (blocked.length === 0 && sentToday > 0) notes.push(`今日已主动 ${sentToday} 条`)

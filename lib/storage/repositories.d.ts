@@ -9,6 +9,8 @@
 import type { Database, Row } from './database.js';
 import type { AffectSnapshot, DeliveryReceipt, EpisodeRecord, MemoryKind, Personality, RawMessage, RememberedItem, TaskKind, TaskStatus, Visibility } from '../domain/types.js';
 import { tokensToMatchQuery } from '../memory/normalizer.js';
+/** `unknown` 投递状态的宽限期：超过这段时间仍无回复，就按「没送达」处理，不再压制主动消息。 */
+export declare const UNKNOWN_DELIVERY_GRACE_MS: number;
 export interface CompanionRow {
     id: string;
     name: string;
@@ -271,8 +273,16 @@ export declare class Repositories {
     lastOutboxForConversation(conversationId: string): Row | undefined;
     /** 日限额与冷却：某会话在 [sinceMs, now] 内已发/在途的主动消息数。 */
     countOutboxSince(conversationId: string, sinceMs: number): number;
-    /** 有过期未确认的主动消息（用于「未回复就暂停」判定，§14.2）。 */
-    unresolvedOutbox(conversationId: string, sinceMs: number): Row[];
+    /**
+     * 已发出或发送结果不明、尚未得到回复的主动消息（§14.2）。
+     *
+     * `unknown` 表示「发出去了但没拿到确认」，可能根本没送达。若永久算作未回复，
+     * 一条投递失败的消息会让主动消息永久停摆，而主人永远不会回复一条他没看到的消息。
+     * 因此允许调用方给 `unknown` 一个截止时间（通常是 now - 宽限期）：早于该时间仍
+     * 没有回应的 `unknown` 按未送达处理。不传则保持旧行为（`unknown` 一直计入），
+     * 避免依赖挂钟、也避免假时钟下的测试结果漂移。
+     */
+    unresolvedOutbox(conversationId: string, sinceMs: number, unknownSinceMs?: number): Row[];
     currentCheckpoint(conversationId: string): Row | undefined;
     putCheckpoint(input: {
         id: string;

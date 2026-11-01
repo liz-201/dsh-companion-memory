@@ -3,6 +3,7 @@ import type { Repositories } from '../storage/repositories.js'
 import type { IdentityBinding, RawMessage } from '../domain/types.js'
 import { partsInZone } from '../domain/time-parse.js'
 import { SPONTANEOUS_OUTBOX } from '../storage/outbox-policy.js'
+import { isHumanMessage } from '../memory/source-policy.js'
 
 export type FeedbackKind = 'positive' | 'negative' | 'busy' | 'explicit_preference' | 'unrelated' | 'unknown'
 export function classifyFeedback(text: string): FeedbackKind {
@@ -13,7 +14,8 @@ export function classifyFeedback(text: string): FeedbackKind {
   return 'unknown'
 }
 export function observeFeedback(repos: Repositories, binding: IdentityBinding, message: RawMessage): void {
-  if (message.role !== 'user' || message.deletedAtMs !== null) return
+  // 机器投递的文本（例如桥接回信）可能恰好写着「先别主动」，那不是主人的意愿。
+  if (!isHumanMessage(message)) return
   const ownerPrivate = binding.conversationKind === 'private' && binding.principalId.includes(':owner:')
   const kind = /比如|引用|台词|假如|[“「]/.test(message.content) ? 'unrelated' : classifyFeedback(message.content)
   if (ownerPrivate && kind === 'explicit_preference' && /别主动找我|先别主动|暂时不要主动/.test(message.content)) {

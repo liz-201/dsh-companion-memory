@@ -30,6 +30,8 @@ import {
 } from './emotion-decay.js'
 import { applyDailyCaps, checkEligibility, isRepairIntent, isSameConflictEpisode, repeatMultiplier, scaleEffect } from './event-policy.js'
 import type { RelationshipDelta } from './types.js'
+import { advanceDrives, settleDrives } from './drive.js'
+import type { Drives } from './types.js'
 
 export const PRESETS: Readonly<Record<'irritable' | 'balanced' | 'gentle', Personality>> = {
   irritable: { irritability: 0.8, sensitivity: 0.6, directness: 0.85, selfControl: 0.35, warmth: 0.5, initiative: 0.5 },
@@ -69,6 +71,8 @@ export interface ReduceContext {
   /** 可能合并的 open/repairing episode；没有则 undefined。 */
   episode?: EpisodeContext | undefined
   fromInboundUserMessage: boolean
+  /** 这条用户消息的稳定标识（seq 或受控计数）；同一条消息的多个事件只扣一次驱力。 */
+  replyMark?: string | number
   establishedTeasingContext: boolean
   roleplay: boolean
   /** 每轮只允许一次幂等；重复事件返回 sameAsPrevious。 */
@@ -114,6 +118,7 @@ function cloneSnapshot(snapshot: AffectSnapshot): AffectSnapshot {
     personality: { ...snapshot.personality },
     relationship: { ...snapshot.relationship },
     mood: { ...snapshot.mood },
+    ...(snapshot.drives === undefined ? {} : { drives: { ...snapshot.drives } }),
     openEpisodeIds: [...snapshot.openEpisodeIds],
     ruleVersion: snapshot.ruleVersion,
   }
@@ -133,6 +138,7 @@ export function initialSnapshot(
     personality: { ...PRESETS[preset] },
     relationship: { ...INITIAL_RELATIONSHIP },
     mood: { ...INITIAL_MOOD },
+    drives: { longing: 0, desire: 0, lastSettledAtMs: nowMs },
     openEpisodeIds: [],
     ruleVersion,
   }
@@ -144,15 +150,47 @@ export function initialSnapshot(
  */
 export function projectSnapshot(snapshot: AffectSnapshot, nowMs: number, config: AffectConfig): AffectSnapshot {
   const elapsed = nowMs - snapshot.asOfMs
-  if (!Number.isFinite(elapsed) || elapsed <= 0) return cloneSnapshot(snapshot)
+  if (!Number.isFinite(elapsed) || elapsed <= 0) {
+    const settled = cloneSnapshot(snapshot)
+    settled.drives = settleDrives(snapshot.drives, nowMs, snapshot.relationship.affection, {
+      asOfMs: snapshot.asOfMs,
+      intimacy: snapshot.relationship.familiarity,
+    })
+    return settled
+  }
   const next = cloneSnapshot(snapshot)
   next.mood = decayMood(snapshot.mood, elapsed, {
     halfLifeMinutes: config.halfLifeMinutes,
     decayGrievance: false,
   })
   next.relationship = decayRelationship(snapshot.relationship, elapsed, { decayGrievance: false })
+  // 读时补齐缺口：没有事件的时间也要算进「等了多久」，且重复调用不翻倍。
+  next.drives = settleDrives(snapshot.drives, nowMs, next.relationship.affection, {
+    asOfMs: snapshot.asOfMs,
+    intimacy: next.relationship.familiarity,
+  })
   next.asOfMs = nowMs
   return next
+}
+
+/**
+ * 一条真实用户消息的驱力结算（与事件个数无关）。
+ *
+ * affect 的 reduce 是「一个 appraisal 一次」，而一条消息可能产出 0 个或多个
+ * appraisal。驱力的「被回应」必须按消息结算：e=[] 的普通回复同样要降，一条
+ * 消息里的多个 e 也不能把 0.35 连乘。同一条消息重复调用幂等（靠 lastReplyMark）。
+ *
+ * 不写库、不改 revision：调用方决定何时持久化。
+ */
+export function settleDrivesForUserMessage(
+  snapshot: AffectSnapshot,
+  options: { nowMs: number; replyMark: string | number; intimacy?: number },
+): Drives {
+  return advanceDrives(snapshot.drives, options.nowMs, snapshot.relationship, true, {
+    asOfMs: snapshot.asOfMs,
+    replyMark: options.replyMark,
+    ...(options.intimacy === undefined ? {} : { intimacy: options.intimacy }),
+  })
 }
 
 /** 冲突事件才合并 episode；其他事件各自独立，避免把道歉也塞进争吵里。 */
@@ -192,7 +230,16 @@ export function reduce(
     }
   }
 
-  // 1) 先在事件时刻做一次分量衰减（不是每分钟 tick）。
+  // 2) 驱力层：先把「这一轮之前攒了多久」结算掉，再看这一轮是不是回应。
+  //    去重键默认取 event.sourceMessageId：同一条消息的多个 appraisal 因此只扣一次，
+  //    而同毫秒的两条不同消息因为 id 不同，各扣一次。
+  const replyMark = context.replyMark ?? event.sourceMessageId
+  state.drives = advanceDrives(previous.drives, effectiveMs, previous.relationship, context.fromInboundUserMessage, {
+    asOfMs: previous.asOfMs,
+    ...(replyMark === undefined ? {} : { replyMark }),
+  })
+
+  // 3) 事件分量衰减（不是每分钟 tick）。
   const elapsed = effectiveMs - state.asOfMs
   if (elapsed > 0) {
     state.mood = decayMood(state.mood, elapsed, {

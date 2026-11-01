@@ -13,6 +13,7 @@ import { PersonaContexts } from '../runtime/persona-context.js'
 import { scheduleConsolidation } from '../runtime/consolidation-scheduler.js'
 import { interactionHabits, renderInteractionHabits } from '../memory/interaction-habits.js'
 import { learnExplicitHabit } from '../memory/habit-learning.js'
+import { detectSourceKind, isHumanMessage } from '../memory/source-policy.js'
 import { observeOpportunity } from '../proactive/opportunity.js'
 import { observeFeedback } from '../proactive/feedback.js'
 import { ExpressionRuntime } from '../expression/runtime.js'
@@ -67,7 +68,7 @@ export function installLocalIntegration(deps: {
   }
   background.register('extract', async job => {
     const message = repos.getRawMessage(String(job.payload['messageId']))
-    if (!message || message.role !== 'user' || message.deletedAtMs !== null) return
+    if (!message || !isHumanMessage(message)) return
     // Resolve the persisted conversation's shared owner, including after importing an older partitioned file.
     const conversation = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', message.conversationId)
     if (!conversation) return
@@ -206,7 +207,7 @@ export function installLocalIntegration(deps: {
     if (key === 'undefined') return
     repos.db.transaction(() => {
       const inserted = repos.insertRawMessage({ id: `${binding.conversationId}:${key}`, conversationId: binding.conversationId,
-        platformMessageKey: key, role: user ? 'user' : 'assistant', sourceKind: 'dsh', content: text,
+        platformMessageKey: key, role: user ? 'user' : 'assistant', sourceKind: user ? detectSourceKind(text, 'dsh') : 'dsh', content: text,
         occurredAtMs: typeof event['time'] === 'number' ? event['time'] : now, observedAtMs: now,
         deliveryStatus: user ? null : 'accepted', deletedAtMs: null })
       if (user && inserted.inserted) background.enqueue('extract', { messageId: inserted.row.id, sessionId: id }, {

@@ -52,13 +52,19 @@ export class Database {
       mkdirSync(dirname(this.file), { recursive: true })
     }
     this.raw = new DatabaseSync(this.file)
-    // foreign_keys 必须在连接层开启，SQL 事务里写无效。
-    this.raw.exec('PRAGMA foreign_keys = ON')
-    this.raw.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(options.busyTimeoutMs))}`)
-    if (options.memory !== true) {
-      // WAL 让后台读不阻塞前台写；内存库不支持 WAL。
-      this.raw.exec('PRAGMA journal_mode = WAL')
-      this.raw.exec('PRAGMA synchronous = NORMAL')
+    try {
+      // foreign_keys 必须在连接层开启，SQL 事务里写无效。
+      this.raw.exec('PRAGMA foreign_keys = ON')
+      this.raw.exec(`PRAGMA busy_timeout = ${Math.max(1, Math.trunc(options.busyTimeoutMs))}`)
+      if (options.memory !== true) {
+        // WAL 让后台读不阻塞前台写；内存库不支持 WAL。
+        this.raw.exec('PRAGMA journal_mode = WAL')
+        this.raw.exec('PRAGMA synchronous = NORMAL')
+      }
+    } catch (error) {
+      this.raw.close()
+      this.closed = true
+      throw error
     }
   }
 

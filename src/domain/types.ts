@@ -70,6 +70,18 @@ export interface Mood {
   expressiveness: number
 }
 
+/** 驱力层：与 affect 并列的「有指向、有时长」的状态，由缺口累积而非事件奖励。 */
+export interface Drives {
+  /** 未被回应的期待：随时间单调升，被回应时快速下降但留痕。 */
+  longing: number
+  /** 想被靠近的强度：只调语气上限与主动性，不是露骨内容的开关。 */
+  desire: number
+  /** 上次结算到的时刻；用于补齐离线缺口，保证重复结算不翻倍。 */
+  lastSettledAtMs: number
+  /** 已结算过「被回应」的那条用户消息；同一条消息的多个事件只允许扣一次。 */
+  lastReplyMark?: string | number
+}
+
 export interface AffectSnapshot {
   principalId: string
   revision: number
@@ -78,6 +90,7 @@ export interface AffectSnapshot {
   personality: Personality
   relationship: Relationship
   mood: Mood
+  drives?: Drives
   openEpisodeIds: string[]
   ruleVersion: string
 }

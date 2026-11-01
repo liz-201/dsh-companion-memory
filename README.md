@@ -98,10 +98,14 @@ cd Z:\deepseekharness\fiels\dsh-companion-memory
 
 ```powershell
 $env:ELECTRON_RUN_AS_NODE='1'
-& 'Z:\dsh\DeepSeek Harness.exe' --test "tests/**/*.test.mjs"   # 45 单元 + 3 集成
+& 'Z:\dsh\DeepSeek Harness.exe' --test "tests/**/*.test.mjs"   # 61 单元 + 407 集成
 & 'Z:\dsh\DeepSeek Harness.exe' scripts\replay.mjs --turns 10000
 & 'Z:\dsh\DeepSeek Harness.exe' scripts\benchmark.mjs
 ```
+
+换设备后先跑 `npm run check:memory`：确认记忆只由本地 SQLite 承担，没有被需要云端
+token 的外部插件顶掉。判定项与修复见
+[docs/DEVICE_SELF_SUFFICIENCY.md](docs/DEVICE_SELF_SUFFICIENCY.md)。
 
 本机实测结果见 [docs/ACCEPTANCE_REPORT.md](docs/ACCEPTANCE_REPORT.md)：
 回放 10000 轮 0 失败、检索 p95 7.3ms（目标 <40ms）、单元 45/45、集成 3/3。
@@ -115,6 +119,7 @@ $env:ELECTRON_RUN_AS_NODE='1'
 
 - [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) — 本机环境与构建方式
 - [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) — 宿主能力探测与降级矩阵
+- [docs/DEVICE_SELF_SUFFICIENCY.md](docs/DEVICE_SELF_SUFFICIENCY.md) — 换设备后记忆为什么还在（含一行修复）
 - [docs/INSTALL.md](docs/INSTALL.md) — 安装、启用、配置
 - [docs/ROLLBACK.md](docs/ROLLBACK.md) — 禁用、卸载、备份恢复
 - [docs/USER_REVIEW.md](docs/USER_REVIEW.md) — 人工验收怎么走

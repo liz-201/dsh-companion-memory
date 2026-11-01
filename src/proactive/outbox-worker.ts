@@ -17,6 +17,7 @@
 import type { Config } from '../config.js'
 import type { DeliveryReceipt } from '../domain/types.js'
 import type { Repositories } from '../storage/repositories.js'
+import { UNKNOWN_DELIVERY_GRACE_MS } from '../storage/repositories.js'
 import type { QqTransport } from '../adapters/qq-transport.js'
 import type { Metrics } from '../runtime/metrics.js'
 import { checkGates, startOfDayMs } from './candidate-builder.js'
@@ -203,7 +204,7 @@ export class OutboxWorker {
             if (others.filter(other => Number(other['sent_at_ms'] ?? other['planned_at_ms']) >= day).length >= frequency.dailyLimit) return 'global-daily-limit'
             const last = others[0]
             if (last && nowMs - Number(last['sent_at_ms'] ?? last['planned_at_ms']) < frequency.minGapMinutes * 60000) return 'cooldown'
-            const unresolved = repos.unresolvedOutbox(conversationId, 0).filter(other => other['id'] !== row['id'] && ['sent','unknown'].includes(String(other['status'])))
+            const unresolved = repos.unresolvedOutbox(conversationId, 0, nowMs - UNKNOWN_DELIVERY_GRACE_MS).filter(other => other['id'] !== row['id'] && ['sent','unknown'].includes(String(other['status'])))
             if (unresolved.length >= config.proactive.pauseAfterUnanswered) return 'awaiting-reply'
             const opportunity = str(row, 'opportunity_id')
             if (opportunity?.startsWith('op:')) {

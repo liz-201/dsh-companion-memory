@@ -52,6 +52,8 @@
     "test:integration": "node --test \"tests/integration/**/*.test.mjs\"",
     "test:replay": "node scripts/replay.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "check:memory": "node scripts/fix-profile-memory.mjs --dry-run",
+    "fix:memory": "node scripts/fix-profile-memory.mjs",
     "benchmark": "node scripts/benchmark.mjs --mode local",
     "bench:local": "node scripts/benchmark.mjs --mode local",
     "bench:live": "node scripts/benchmark.mjs --mode live --smoke",

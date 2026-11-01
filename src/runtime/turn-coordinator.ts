@@ -30,6 +30,7 @@ import { systemClock, type Clock, type DeliveryReceipt, type EpisodeRecord, type
 import type { Repositories } from '../storage/repositories.js'
 import type { Retriever } from '../memory/retriever.js'
 import type { FactUpdater } from '../memory/fact-updater.js'
+import { isHumanMessage } from '../memory/source-policy.js'
 import { buildContext, renderBoundaries, renderCheckpoint, describeBudget, PromptStore } from './context-builder.js'
 import { TokenLedger, estimatedCounter, type TokenCounter } from './context-budget.js'
 import { StreamParser, type ParserResult } from './stream-parser.js'
@@ -169,7 +170,8 @@ export class TurnCoordinator {
   /** Apply background observations to a persisted host message without generating a second reply. */
   async observe(binding: IdentityBinding, message: RawMessage, payload: EvtPayload,
     options: { producer?: 'background_observer' | 'local_rule' } = {}): Promise<void> {
-    if (message.role !== 'user' || this.deps.repos.getRawMessage(message.id)?.deletedAtMs !== null) return
+    const currentMessage = this.deps.repos.getRawMessage(message.id)
+    if (!currentMessage || !isHumanMessage(currentMessage)) return
     const now = this.clock.now()
     const turnId = `observe:${message.id}`
     const previousTurn = this.deps.repos.getTurn(turnId)
@@ -424,6 +426,8 @@ export class TurnCoordinator {
     producer: 'live_tail' | 'background_observer' | 'local_rule' = 'live_tail',
   ): Promise<boolean> {
     const deps = this.deps
+    const source = deps.repos.getRawMessage(message.id)
+    if (!source || !isHumanMessage(source)) return false
     const now = this.clock.now()
     let applied = false
     const teasing = deps.teasingContext?.(binding.conversationId) ?? false
@@ -713,4 +717,3 @@ function describeError(error: unknown): string {
   if (error instanceof Error) return error.name + ': ' + error.message
   return String(error)
 }
-

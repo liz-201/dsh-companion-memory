@@ -127,6 +127,17 @@ async function main() {
   const libJs = countFiles(join(root, 'lib'), '.js')
   add(libJs >= srcTs ? 'ok' : 'warn', '编译产物', `src ${srcTs} 个 .ts / lib ${libJs} 个 .js`, join(root, 'lib'))
 
+  // 8) 记忆职责归属：外部云端记忆插件不该在没凭据时抢职责（只读判定，修复走 fix 脚本）
+  try {
+    const { inspectProfile } = await import('./profile-memory-guard.mjs')
+    const guard = inspectProfile({ home: dshHome() })
+    for (const finding of guard.findings) {
+      add(finding.level, '记忆职责', `${finding.code}：${finding.detail}`, finding.fix ? `${finding.file}（修复：${finding.fix}）` : finding.file)
+    }
+  } catch (error) {
+    add('warn', '记忆职责', `检查失败：${String(error?.message ?? error)}`, 'scripts/profile-memory-guard.mjs')
+  }
+
   return report()
 }
 

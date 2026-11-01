@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Repositories } from '../storage/repositories.js'
 import type { IdentityBinding, RawMessage } from '../domain/types.js'
 import { computerEvidence } from './computer-evidence.js'
+import { isHumanMessage } from '../memory/source-policy.js'
 
 export type OpportunityKind = 'follow_up' | 'interest_share' | 'positive_revisit' | 'shared_topic' | 'repair' | 'reminder' | 'computer_event'
 export function opportunityScore(scores: Record<string, number>): number {
@@ -20,7 +21,8 @@ export function addOpportunity(repos: Repositories, input: { binding: IdentityBi
 }
 /** Deterministic explicit follow-up cues only; nothing is inferred from mere silence. */
 export function observeOpportunity(repos: Repositories, binding: IdentityBinding, message: RawMessage): void {
-  if (message.role !== 'user' || message.deletedAtMs !== null || /比如|台词|假如|[“「]/.test(message.content)) return
+  // 机器投递的文本（桥接回信等）不是主人的话，不能据此生成跟进机会。
+  if (!isHumanMessage(message) || /比如|台词|假如|[“「]/.test(message.content)) return
   const text = message.content
   if (/(?:明天|待会|一会|稍后|今天).{0,25}(?:面试|考试|比赛|发布|演出|看结果)/.test(text)) {
     const delay = text.includes('明天') ? 30 * 60 * 60_000 : 3 * 60 * 60_000

@@ -33,7 +33,7 @@ try {
     const day = Math.floor(tick / 72)
     if (tick % 72 === 25) {
       repos.setSetting('proactive.enabled', day === 4 ? '0' : '1', now)
-      const message = repos.insertRawMessage({ id: `day-${day}`, conversationId: 'c', platformMessageKey: `day-${day}`, role: 'user', sourceKind: 'replay', content: '我今天去面试', occurredAtMs: now, observedAtMs: now, deliveryStatus: null, deletedAtMs: null }).row
+      const message = repos.insertRawMessage({ id: `day-${day}`, conversationId: 'c', platformMessageKey: `day-${day}`, role: 'user', sourceKind: 'qq', content: '我今天去面试', occurredAtMs: now, observedAtMs: now, deliveryStatus: null, deletedAtMs: null }).row
       addOpportunity(repos, { binding, kind: 'follow_up', summary: message.content, sourceIds: [message.id], nowMs: now, notBeforeMs: now + 3 * 3600000, expiresAtMs: now + 12 * 3600000 })
     }
     const before = calls

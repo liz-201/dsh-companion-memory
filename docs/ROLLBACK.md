@@ -38,9 +38,17 @@ Remove-Item "$env:USERPROFILE\.dsh\companions\backups" -Recurse -Force
 
 ## 恢复
 
-1. 把备份文件放回 `%USERPROFILE%\.dsh\companions\<companion-id>.sqlite3`；
-2. 重新启用插件；
-3. 跑 `node scripts/doctor.mjs`，`完整性检查 = ok`、`迁移版本` 与备份时一致即恢复成功。
+1. 完全退出宿主，保留当前数据库；不要直接用旧备份覆盖它。
+2. 将 `DSH_COMPANION_CONFIG` 指向所需的 JSON 配置（含目标 `storage.directory` 和 `companion.id`），运行：
+
+   ```powershell
+   node scripts/companionctl.mjs restore <backup.sqlite3> --offline-confirm
+   ```
+
+   CLI 先在临时副本上检查完整性和迁移，合入当前库的删除记录，重放原文与记忆删除、撤销派生习惯及情感事件，直接重建受影响的情感快照和全文索引。验证成功后，另存覆盖前备份，再替换已关闭的目标库。不同或未知 owner、身份冲突及损坏备份会拒绝恢复。
+3. 重新启用插件，再运行 `node scripts/doctor.mjs` 检查完整性和迁移状态。
+
+此流程依赖当前库或备份中尚存的 tombstone。若当前库已经丢失、且旧备份没有较新的删除记录，仅凭这份旧备份无法推断后来删除了什么。覆盖前备份本身也可能含历史原文，仍遵循原有备份保留期限。
 
 数据库迁移只前进不回退：如果备份来自**更新**的版本而当前插件是**旧**版本，
 启动会因迁移版本高于代码预期而报错，此时要么升级插件，要么用备份前的旧库。

@@ -31,6 +31,7 @@ import {
 import {
  backupNow, backupSummary }
  from '../storage/backup.js'
+import { restoreBackup } from '../storage/restore.js'
 import {
  summarizeState, projectSnapshot }
  from '../domain/affect-reducer.js'
@@ -224,22 +225,13 @@ if (!hasFlag(argv, 'offline-confirm')) {
 '拒绝直接覆盖：宿主可能正在使用这个库，运行中换库会让应用状态和磁盘不一致。',        '正确流程：',
 '  1) 完全退出 DSH 桌面端；',
 '  2) 重新执行并带上 --offline-confirm。',
-`  node src/commands/offline-cli.js restore "${sourcePath}" --offline-confirm`,
+`  node scripts/companionctl.mjs restore "${sourcePath}" --offline-confirm`,
 ].join('\n'),    )
     return 4  }
-const directory = join(dirname(file), 'backups')
-const handle = openDatabase(config.storage, false, config.companion.id)
-let record
   try {
-record = backupNow(      handle,      {
- directory, keepDays: config.storage.backupRetentionDays, label: `${config.companion.id}-pre-restore` }
-,      Date.now(),    )  }
- finally {
-handle.close()  }
-io.out(`覆盖前已另存：${record.file}`)
-  try {
-const bytes = readFileSync(sourcePath)
-writeFileSync(file, bytes)  }
+const restored = restoreBackup(config, sourcePath, Date.now())
+io.out(`覆盖前已另存：${restored.backupFile}`)
+io.out(`已重放 ${restored.replayed} 条删除记录`)  }
 catch (error) {
 io.err(`恢复失败：${(error as Error).message}`)
     return 5  }

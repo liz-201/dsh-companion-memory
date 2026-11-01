@@ -11,6 +11,7 @@
 import type { AffectConfig } from '../config.js';
 import type { AffectSnapshot, Clock, EventKind, Mood, Personality, Relationship, ValidatedAppraisal } from './types.js';
 import type { RelationshipDelta } from './types.js';
+import type { Drives } from './types.js';
 export declare const PRESETS: Readonly<Record<'irritable' | 'balanced' | 'gentle', Personality>>;
 export declare const INITIAL_RELATIONSHIP: Relationship;
 export declare const INITIAL_MOOD: Mood;
@@ -29,6 +30,8 @@ export interface ReduceContext {
     /** 可能合并的 open/repairing episode；没有则 undefined。 */
     episode?: EpisodeContext | undefined;
     fromInboundUserMessage: boolean;
+    /** 这条用户消息的稳定标识（seq 或受控计数）；同一条消息的多个事件只扣一次驱力。 */
+    replyMark?: string | number;
     establishedTeasingContext: boolean;
     roleplay: boolean;
     /** 每轮只允许一次幂等；重复事件返回 sameAsPrevious。 */
@@ -57,6 +60,20 @@ export declare function initialSnapshot(principalId: string, preset: keyof typeo
  * 状态」。不写库、不改 revision。
  */
 export declare function projectSnapshot(snapshot: AffectSnapshot, nowMs: number, config: AffectConfig): AffectSnapshot;
+/**
+ * 一条真实用户消息的驱力结算（与事件个数无关）。
+ *
+ * affect 的 reduce 是「一个 appraisal 一次」，而一条消息可能产出 0 个或多个
+ * appraisal。驱力的「被回应」必须按消息结算：e=[] 的普通回复同样要降，一条
+ * 消息里的多个 e 也不能把 0.35 连乘。同一条消息重复调用幂等（靠 lastReplyMark）。
+ *
+ * 不写库、不改 revision：调用方决定何时持久化。
+ */
+export declare function settleDrivesForUserMessage(snapshot: AffectSnapshot, options: {
+    nowMs: number;
+    replyMark: string | number;
+    intimacy?: number;
+}): Drives;
 export declare function reduce(previous: AffectSnapshot, event: ReduceEvent, clock: Clock, config: AffectConfig, context: ReduceContext): ReduceResult;
 export interface StateSummary {
     relationshipLevels: string;

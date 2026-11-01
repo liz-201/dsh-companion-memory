@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 import type { MemoryConfig } from '../config.js'
 import type { AffectSnapshot, RememberedItem } from '../domain/types.js'
 import { summarizeState, type StateSummary } from '../domain/affect-reducer.js'
+import { drivesOf, renderDriveLine } from '../domain/drive.js'
 import type { ScoredMemory } from '../memory/retriever.js'
 import { estimateTokens, measureAndFit, type ContextSegments, type MeasureResult, type TokenCounter } from './context-budget.js'
 
@@ -147,6 +148,8 @@ export function renderStateBlock(snapshot: AffectSnapshot, previous?: StateSumma
     `和对方：${summary.relationshipLevels}`,
     `未了结：${summary.episodeHint}`,
   ]
+  const driveLine = renderDriveLine(drivesOf(snapshot))
+  if (driveLine !== '') lines.push(driveLine)
   if (summary.rules !== '') lines.push(summary.rules)
   return lines.join('\n')
 }
