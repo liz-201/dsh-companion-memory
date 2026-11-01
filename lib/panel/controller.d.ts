@@ -47,6 +47,19 @@ export declare class PluginPanel implements PanelControls {
         conversationId?: string;
         query?: string;
     }): {
+        eroticPolicy: {
+            characterAdultConfirmed: boolean;
+            adultsConfirmed: boolean;
+            stopped: boolean;
+            stopIds: string[];
+            enabled: boolean;
+            ownerAdultConfirmed: boolean;
+            characterContextId: string;
+            acknowledgedStopIds: string[];
+            resumeEpochMs: number;
+            revision: number;
+        };
+        eroticState: import("../domain/erotic-interest.js").EroticInterestState;
         continuous: import("../domain/continuous-affect.js").ContinuousAffectState | null;
         emotionTimeline: import("../storage/emotion-timeline.js").EmotionTimeline;
         emotion: import("../config.js").EmotionConfig;

@@ -8,8 +8,8 @@ interface Checkpoint {
 }
 export interface PortablePayload {
     format: 'dsh-companion-transfer';
-    version: 1 | 2 | 3 | 4 | 5 | 6;
-    formatVersion?: 2 | 3 | 4 | 5 | 6;
+    version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+    formatVersion?: 2 | 3 | 4 | 5 | 6 | 7;
     minReaderVersion?: string;
     id: string;
     createdAtMs: number;

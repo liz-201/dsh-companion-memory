@@ -1,5 +1,7 @@
 # dsh-companion-memory
 
+> **0.3.0-dev.15**：新增默认关闭的[成人非露骨亲密表达](docs/INTIMACY_DEV15.md)，包含本机成年范围确认、自然表达线索、立即停止、明确恢复及跨设备停止记录同步。新导出为 portable v7，读取器至少需 dev.15；开关和成年声明不随记忆导出。
+
 > **0.3.0-dev.14**：新增有证据的细分情感体验、情绪对象隔离和混合表达，补齐观察器、保存、回放及桌面／QQ／主动表达接线。新字段随 portable v6 同步，两台电脑需使用 dev.14；旧文件继续可读。真实模型诊断与效果边界见[情感覆盖说明](docs/HUMAN_AFFECT_DEV14.md)。
 
 可选：[Codex 与 DSH Desktop 直接协作桥接](docs/CODEX_BRIDGE.md)，通过本机 API 交换开发任务和结果。

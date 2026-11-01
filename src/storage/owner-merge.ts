@@ -51,7 +51,7 @@ function counts(tables: Record<string, Row[]>, principalIds: Set<string>): Owner
 }
 
 function validatePackage(config: Config, payload: PortablePayload, checksum: string): void {
-  if (!payload || payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5].includes(payload.version)
+  if (!payload || payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6, 7].includes(payload.version)
     || typeof payload.id !== 'string' || !payload.id || typeof payload.ownerId !== 'string' || !payload.ownerId
     || !payload.tables || !Array.isArray(payload.schema) || typeof checksum !== 'string' || !checksum) {
     throw new OwnerMergeInputError('记忆文件信息无效，请重新选择文件并预览。')
@@ -66,7 +66,7 @@ function blockingConflicts(local: Record<string, Row[]>, payload: PortablePayloa
     if (principalIds.has(String(row['principal_id']))) row['principal_id'] = target
     return row
   }
-  for (const table of ['raw_messages', 'memories', 'affect_events', 'deletion_tombstones']) {
+  for (const table of ['raw_messages', 'memories', 'affect_events', 'deletion_tombstones','intimacy_stop_events']) {
     const existing = new Map((local[table] ?? []).map(row => [row['id'], row]))
     for (const incoming of payload.tables[table] ?? []) {
       const previous = existing.get(incoming['id'])
@@ -78,6 +78,7 @@ function blockingConflicts(local: Record<string, Row[]>, payload: PortablePayloa
         left['deleted_at_ms'] = right['deleted_at_ms'] = null
       }
       if (table === 'affect_events' && (left['status'] === 'retracted' || right['status'] === 'retracted')) left['status'] = right['status'] = 'retracted'
+      if(table==='intimacy_stop_events'&&(left['source_message_id']===null||right['source_message_id']===null))left['source_message_id']=right['source_message_id']=null
       if (table === 'deletion_tombstones') {
         for (const row of [left, right]) {
           const selector = JSON.parse(String(row['selector_json'])) as Record<string, unknown>

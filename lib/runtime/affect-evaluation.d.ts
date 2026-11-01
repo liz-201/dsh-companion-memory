@@ -79,7 +79,7 @@ export declare function scoreAffectObservation(caseId: string, output: string): 
     caseId: string;
     passed: boolean;
     labels: string[];
-    missing: ("fear" | "gratitude" | "happy-for" | "hate" | "love" | "interest" | "amusement" | "awe" | "frustration" | "grief" | "nostalgia" | "owner-pull")[];
+    missing: ("interest" | "fear" | "gratitude" | "happy-for" | "hate" | "love" | "amusement" | "awe" | "frustration" | "grief" | "nostalgia" | "owner-pull")[];
     forbidden: ("吃味" | "loneliness")[];
     unwanted: boolean;
     appraisalCount: number;

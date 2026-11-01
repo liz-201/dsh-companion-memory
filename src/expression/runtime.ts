@@ -14,13 +14,21 @@ import { humanSourceSql } from '../memory/source-policy.js'
 import { continuousMood } from '../domain/continuous-mood.js'
 import { regulateExpression } from './regulation.js'
 import { attendAffect } from '../domain/affect-attention.js'
+import { chooseIntimacyIntent } from './intimacy-policy.js'
+import { hasIntimacyVoice, intimacyOutputIssue } from './intimacy-guard.js'
+import { readEroticPolicy, readIntimacyExpression, recordIntimacyExpression, isEroticCharacterConfirmed } from '../storage/erotic-interest.js'
+import { qualifyEroticCue } from '../domain/erotic-evidence.js'
+import { parseAppraisals } from '../domain/emotion-appraisal.js'
+import { isHumanMessage } from '../memory/source-policy.js'
 
 export class ExpressionRuntime {
   private plans = new Map<string, ExpressionPlan>()
   private exposure = new Map<string, { messages: number; days: Set<number>; seq: number; deletionVersion: number }>()
+  private intimacyPlans = new Map<string,{sourceId:string;policyRevision:number}>()
+  private intimacyDeliveries = new Map<string,{sourceId:string;policyRevision:number}>()
   constructor(private readonly repos: Repositories, private readonly config: Config, private readonly callModel?: ModelCaller) {}
 
-  plan(state: AffectSnapshot, userText: string, nowMs: number): ExpressionPlan {
+  plan(state: AffectSnapshot, userText: string, nowMs: number, binding?: IdentityBinding): ExpressionPlan {
     const personaId = this.repos.getSetting(`persona.id:${state.principalId}`) ?? 'builtin'
     const profile = new PersonalityProfiles(this.repos).get(this.config.companion.id, personaId)
     const previous = this.plans.get(state.principalId)
@@ -40,10 +48,38 @@ export class ExpressionRuntime {
       if (continuous.drives.load > .7) plan.playfulness = Math.min(plan.playfulness,.3)
       plan.reasonCodes.push('continuous-v1',...continuous.emotions.slice(0,2).map(e=>`emotion:${e.category}`))
     }
+    const policy=readEroticPolicy(this.repos,state.principalId)
+    const row=binding?this.repos.db.get<{id:string}>(`SELECT r.id FROM raw_messages r JOIN conversations c ON c.id=r.conversation_id WHERE c.principal_id=? AND r.conversation_id=? AND ${humanSourceSql('r')} ORDER BY r.seq DESC LIMIT 1`,state.principalId,binding.conversationId):undefined
+    const source=row?this.repos.getRawMessage(row.id):undefined
+    let eligible=false
+    if(source&&binding&&isHumanMessage(source)&&source.content===userText&&binding.visibility==='private'){
+      for(const a of this.repos.db.all<{vector_json:string}>("SELECT vector_json FROM emotion_appraisals WHERE source_message_id=? AND principal_id=? AND status='active'",source.id,state.principalId)){
+        try{const vector=parseAppraisals([JSON.parse(a.vector_json)])[0]!;if(qualifyEroticCue(vector,source.content,{isHuman:true,isPrivate:true,enabled:policy.enabled&&!policy.stopped,adultsConfirmed:isEroticCharacterConfirmed(this.repos,state.principalId,binding.conversationId)})?.kind==='interest')eligible=true}catch{/* Invalid evidence cannot grant a direction. */}
+      }
+    }
+    const last=readIntimacyExpression(this.repos,state.principalId)
+    plan.intimacyIntent=chooseIntimacyIntent({state:this.config.expression.mode==='enforce'?continuous?.eroticInterest??null:null,mode:plan.mode,isPrivate:binding?.visibility==='private',invitation:source?{sourceId:source.id,atMs:source.occurredAtMs,eligible}:null,nowMs,...(last?{lastExpressionAtMs:last.atMs,lastExpressionSourceId:last.sourceId}:{})})
+    plan.reasonCodes.push(...plan.intimacyIntent.reasonCodes)
+    if(binding){
+      if(plan.intimacyIntent.kind!=='none'&&source)this.intimacyPlans.set(binding.conversationId,{sourceId:source.id,policyRevision:policy.revision})
+      else this.intimacyPlans.delete(binding.conversationId)
+      if(this.intimacyPlans.size>1000)this.intimacyPlans.delete(this.intimacyPlans.keys().next().value!)
+    }
     const regulated = regulateExpression(plan)
     this.plans.set(state.principalId, regulated)
     if (this.plans.size > 1000) this.plans.delete(this.plans.keys().next().value!)
     return regulated
+  }
+
+  /** Called only by actual delivery ingress, never by preview or plan reads. */
+  recordDelivery(binding: IdentityBinding, text: string, nowMs: number): void {
+    const pending=this.intimacyDeliveries.get(binding.conversationId)
+    this.intimacyDeliveries.delete(binding.conversationId)
+    this.intimacyPlans.delete(binding.conversationId)
+    if(!pending||!hasIntimacyVoice(text)||readEroticPolicy(this.repos,binding.principalId).revision!==pending.policyRevision)return
+    const source=this.repos.getRawMessage(pending.sourceId)
+    if(!source||source.conversationId!==binding.conversationId)return
+    recordIntimacyExpression(this.repos,binding.principalId,pending.sourceId,nowMs)
   }
 
   private contactExposure(principalId: string, nowMs: number): { messages: number; days: number } {
@@ -58,7 +94,13 @@ export class ExpressionRuntime {
   }
 
   async guard(text: string, state: AffectSnapshot, userText: string, nowMs: number, signal?: AbortSignal, sourceIds: string[] = [], binding?: IdentityBinding): Promise<GuardResult> {
-    const plan = this.plan(state, userText, nowMs)
+    const previousIntimacy=binding?this.intimacyPlans.get(binding.conversationId):undefined
+    const policyRevision=readEroticPolicy(this.repos,state.principalId).revision
+    const plan = this.plan(state, userText, nowMs,binding)
+    const stale=!!previousIntimacy&&(previousIntimacy.policyRevision!==policyRevision||plan.intimacyIntent?.kind==='none'||previousIntimacy.sourceId!==plan.intimacyIntent?.sourceId)
+    const blocked=(code:string):GuardResult=>({text:null,status:'blocked',issues:[{code,severity:'hard',start:0,end:text.length,reason:'当前亲密表达许可或场景不满足',suggestedAction:'block'}],repairCalls:0,semanticChecks:{intimacy:'fail'}})
+    const initialIssue=stale?'intimacy-policy-changed':intimacyOutputIssue(text,plan,false)
+    if(initialIssue)return blocked(initialIssue)
     plan.sourceIds = sourceIds
     const scope = binding ?? { principalId: state.principalId, conversationId: '', visibility: 'private' as const }
     plan.forbiddenAddresses = activeHabits(this.repos, scope, nowMs).filter(habit => habit.kind === 'address_block').map(habit => habit.value)
@@ -103,6 +145,13 @@ export class ExpressionRuntime {
       } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abort) }
     } : undefined
     const result = await guardExpression(text, plan, { history, ...(repair ? { repair } : {}), ...(signal ? { signal } : {}) })
+    const policyChanged=readEroticPolicy(this.repos,state.principalId).revision!==policyRevision
+    const finalIssue=result.text?((previousIntimacy||plan.intimacyIntent?.kind!=='none')&&policyChanged?'intimacy-policy-changed':intimacyOutputIssue(result.text,plan,false)):null
+    if(finalIssue){const failure=blocked(finalIssue);result.text=null;result.status='blocked';result.issues.push(...failure.issues);result.semanticChecks['intimacy']='fail'}
+    if(binding&&result.text&&hasIntimacyVoice(result.text)&&plan.intimacyIntent?.kind!=='none'&&plan.intimacyIntent?.sourceId){
+      this.intimacyDeliveries.set(binding.conversationId,{sourceId:plan.intimacyIntent.sourceId,policyRevision})
+      if(this.intimacyDeliveries.size>1000)this.intimacyDeliveries.delete(this.intimacyDeliveries.keys().next().value!)
+    }
     if (repair && !reserved) result.repairCalls = 0
     if (reserved) {
       this.repos.db.run('UPDATE expression_audits SET issues_json = ?, status = ?, latency_ms = ? WHERE id = ?', JSON.stringify(result.issues.map(({ code, severity }) => ({ code, severity }))), result.status, performance.now() - started, auditId)

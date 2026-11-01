@@ -4,6 +4,7 @@ import type { projectPad } from './pad-projector.js';
 import type { RelationshipDynamicsState } from './relationship-dynamics.js';
 import type { EmotionExperience } from './emotion-experience.js';
 import type { EmotionAppraisal } from './emotion-appraisal.js';
+import type { EroticInterestState } from './erotic-interest.js';
 export interface AffectContext {
     sourceId: string;
     atMs: number;
@@ -28,4 +29,5 @@ export interface ContinuousAffectState {
     appraisalCount: number;
     /** Independent, source-replayed coordinates; never consent or a commitment. */
     relationship: RelationshipDynamicsState;
+    eroticInterest?: EroticInterestState;
 }

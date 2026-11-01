@@ -1,5 +1,6 @@
 ﻿import type { ExpressionPlan } from '../domain/expression-plan.js'
 import type { EmotionComponent, OccCategory } from '../domain/occ-classifier.js'
+import { canExpressIntimacyIntent, INTIMACY_THRESHOLDS } from './intimacy-policy.js'
 
 /**
  * Engineering initials, NOT measured psychological constants.
@@ -57,6 +58,11 @@ export function regulateExpression(plan: ExpressionPlan): ExpressionPlan {
   const next: ExpressionPlan = { ...plan, reasonCodes: [...plan.reasonCodes] }
   /** Idempotent: re-regulating a plan never duplicates a code. */
   const add = (code: string): void => { if (!next.reasonCodes.includes(code)) next.reasonCodes.push(code) }
+  const erotic = plan.continuous?.eroticInterest
+  if (plan.intimacyIntent && plan.intimacyIntent.kind !== 'none' && !canExpressIntimacyIntent(plan.intimacyIntent, erotic, plan.mode)) {
+    next.intimacyIntent = { kind: 'none', reasonCodes: ['intimacy:final-plan-suppressed'] }
+    add('regulate:intimacy-suppressed')
+  }
   // Verbatim/format contracts are untouchable: no emotion instruction, no format, code or number change.
   if (plan.mode === 'structured') return next
 
@@ -100,6 +106,11 @@ export function regulateExpression(plan: ExpressionPlan): ExpressionPlan {
 
   // Desire and passion are not consent, and they never buy more contact.
   if (desire >= REGULATION_THRESHOLDS.desire) add('regulate:no-consent-inference')
+  if (erotic && !erotic.blocked && erotic.blockReason === null && typeof erotic.value === 'number'
+    && Number.isFinite(erotic.value) && erotic.value >= INTIMACY_THRESHOLDS.audit && erotic.value <= 1) {
+    add('regulate:no-consent-inference')
+    add('regulate:intimacy-evidence-not-consent')
+  }
 
   return next
 }

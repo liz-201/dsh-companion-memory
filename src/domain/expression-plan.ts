@@ -4,9 +4,11 @@ import { NEUTRAL, type PersonalityProfile } from './personality-profile.js'
 import { taskMode, type TaskMode } from '../expression/task-mode.js'
 import { turnCue } from './appraisal-context.js'
 import type { ContinuousAffectState } from './continuous-affect.js'
+import type { IntimacyIntent } from '../expression/intimacy-policy.js'
 
 export interface ExpressionPlan {
   continuous?: ContinuousAffectState
+  intimacyIntent?: IntimacyIntent
   ruleVersion: string
   principalId: string
   personalityRevisionId: string

@@ -68,7 +68,7 @@ export class OwnerIdentity {
     const legacy = db.all<{ id: string; user_id: string; bot_account_id: string }>("SELECT p.* FROM principals p WHERE companion_id = ? AND bot_account_id <> 'owner' AND p.id NOT LIKE 'review:%' AND EXISTS (SELECT 1 FROM conversations c WHERE c.principal_id = p.id AND c.kind = 'private') AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.principal_id = p.id AND c.kind = 'group')", this.config.companion.id).filter(row => allowed.has(row.user_id))
     if (!legacy.length) return 0
     db.transaction(() => {
-      const tables = ['conversations', 'appraisals', 'relationship_episodes', 'affect_events', 'memories', 'tasks', 'background_jobs', 'deletion_tombstones', 'audit_events', 'identity_links']
+      const tables = ['conversations', 'appraisals', 'relationship_episodes', 'affect_events', 'memories', 'tasks', 'background_jobs', 'deletion_tombstones', 'audit_events', 'identity_links', 'response_events', 'emotion_appraisals', 'intimacy_stop_events']
       for (const principal of legacy) {
         const oldSnapshot = this.repos.getSnapshot(principal.id)
         const existing = this.repos.getSnapshot(this.principalId)

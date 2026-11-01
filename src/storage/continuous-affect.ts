@@ -12,6 +12,8 @@ import type { ContinuousAffectState, AffectContext } from '../domain/continuous-
 import { humanSourceSql, isHumanMessage } from '../memory/source-policy.js'
 import { qualifiedOwnerPull } from '../domain/relationship-evidence.js'
 import { projectRelationshipDynamics, type RelationshipDynamicsEvent } from '../domain/relationship-dynamics.js'
+import { eroticAffect, readEroticPolicy, isEroticCharacterConfirmed } from './erotic-interest.js'
+import { qualifyEroticCue } from '../domain/erotic-evidence.js'
 export type { ContinuousAffectState } from '../domain/continuous-affect.js'
 
 interface Source { id: string; at: number }
@@ -22,8 +24,10 @@ const cache = new WeakMap<Repositories, Map<string, { stamp: string; responses: 
 export function saveEmotionAppraisals(repos: Repositories, binding: IdentityBinding, message: RawMessage, candidates: unknown, producer = 'background'): number {
   const rows = parseAppraisals(candidates)
   return repos.db.transaction(() => {
-    const owner = repos.db.get<{ principal_id: string }>('SELECT principal_id FROM conversations WHERE id = ?', message.conversationId)
-    if (owner?.principal_id !== binding.principalId || message.conversationId!==binding.conversationId || !isHumanMessage(message) || repos.getRawMessage(message.id)?.deletedAtMs !== null || repos.getRawMessage(message.id)?.content!==message.content) throw Error('Invalid emotion source owner')
+    const persisted=repos.getRawMessage(message.id)
+    const owner = repos.db.get<{ principal_id: string; kind: string }>('SELECT principal_id,kind FROM conversations WHERE id = ?', message.conversationId)
+    if (owner?.principal_id !== binding.principalId || message.conversationId!==binding.conversationId || !isHumanMessage(message) || !persisted || !isHumanMessage(persisted)
+      ||persisted.conversationId!==message.conversationId||persisted.occurredAtMs!==message.occurredAtMs||persisted.content!==message.content) throw Error('Invalid emotion source owner')
     const valid = rows.map(vector => {
       const quote = matchSourceQuote(message.content, vector.quote)
       if (!quote) throw Error('Emotion quote is not present in source message')
@@ -34,6 +38,13 @@ export function saveEmotionAppraisals(repos: Repositories, binding: IdentityBind
         if (!prior || prior.event_time_ms >= message.occurredAtMs || JSON.parse(prior.vector_json).prospect !== 'pending') throw Error('Invalid prior expectation reference')
       }
       const qualified={...vector,quote}
+      if (qualified.eroticCue) {
+        const policy=readEroticPolicy(repos,binding.principalId)
+        const cue=qualifyEroticCue(qualified,message.content,{isHuman:true,isPrivate:owner.kind==='private',enabled:policy.enabled,adultsConfirmed:isEroticCharacterConfirmed(repos,binding.principalId,message.conversationId)})
+        // Stop controls use the deterministic real-ingress path, not model assertions.
+        if(cue?.kind==='interest')qualified.eroticCue=cue
+        else delete qualified.eroticCue
+      }
       const pull = qualifiedOwnerPull(qualified, message.content, binding.conversationKind === 'private')
       if (pull === undefined) delete qualified.pull
       else qualified.pull = pull
@@ -181,5 +192,5 @@ export function continuousAffect(repos: Repositories, config: Config, principalI
     if([...result.components,...facets].some(c=>c.intensity*decay>=.12)) { for(const label of result.displays)displays.add(label);evidenceIds.add(item.sourceId) }
     if((item.vector.appealingness??0)>.3 && decay>.1)drives.exploration=Math.min(1,drives.exploration+.1*decay)
   }
-  return {version:'continuous-v1',parameterVersion:version,drives,pad:projectPad(timed,nowMs,config.emotion.componentHalfLifeMinutes,config.emotion.moodHalfLifeMinutes),emotions:[...emotions].filter(([,v])=>v>=.05).map(([category,intensity])=>({category:category as EmotionComponent['category'],intensity})).sort((a,b)=>b.intensity-a.intensity).slice(0,6),experiences:[...experiences].filter(([,v])=>v>=.05).map(([kind,intensity])=>({kind,intensity})).sort((a,b)=>b.intensity-a.intensity).slice(0,6),contexts:contexts.filter(c=>[...c.emotions,...c.experiences].some(e=>e.intensity>=.12)).slice(-24),displays:[...displays].slice(0,3),evidenceIds:[...evidenceIds].slice(-10),appraisalCount:history.appraisals.filter(item=>item.at<=nowMs).length,relationship:projectRelationshipDynamics(history.relations,nowMs,{intimacyGain:1})}
+  return {version:'continuous-v1',parameterVersion:version,drives,pad:projectPad(timed,nowMs,config.emotion.componentHalfLifeMinutes,config.emotion.moodHalfLifeMinutes),emotions:[...emotions].filter(([,v])=>v>=.05).map(([category,intensity])=>({category:category as EmotionComponent['category'],intensity})).sort((a,b)=>b.intensity-a.intensity).slice(0,6),experiences:[...experiences].filter(([,v])=>v>=.05).map(([kind,intensity])=>({kind,intensity})).sort((a,b)=>b.intensity-a.intensity).slice(0,6),contexts:contexts.filter(c=>[...c.emotions,...c.experiences].some(e=>e.intensity>=.12)).slice(-24),displays:[...displays].slice(0,3),evidenceIds:[...evidenceIds].slice(-10),appraisalCount:history.appraisals.filter(item=>item.at<=nowMs).length,relationship:projectRelationshipDynamics(history.relations,nowMs,{intimacyGain:1}),eroticInterest:eroticAffect(repos,principalId,nowMs)}
 }

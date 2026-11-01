@@ -45,7 +45,7 @@ test('owner motivation gate rejects fiction, third parties, work instructions an
   for(const source of ['我不想和你聊天，别把我想和你聊聊这种说法当真','别主动联系我，我想和你聊聊但现在不行'])assert.equal(qualifiedOwnerPull({focus:'object',quote:'我想和你聊聊',confidence:.95,pull:.8},source,true),undefined)
 })
 
-test('format five carries explicit motivation and original migration checksums across two real databases', () => {
+test('format seven carries explicit motivation and original migration checksums across two real databases', () => {
   const a=fixture(),b=fixture()
   try {
     a.repos.setSetting('owner.id','same-owner',a.now());b.repos.setSetting('owner.id','same-owner',b.now())
@@ -54,7 +54,7 @@ test('format five carries explicit motivation and original migration checksums a
     const path=join(a.directory,'relationship.companion.json')
     exportPortable(a.db,a.config,path,{includePlugin:false,nowMs:a.now()})
     const {payload,checksum}=readPortable(path)
-    assert.equal(payload.version,5);assert.equal(payload.minReaderVersion,'0.3.0-dev.10')
+    assert.equal(payload.version,7);assert.equal(payload.minReaderVersion,'0.3.0-dev.15')
     assert.equal(payload.schema.find(row=>row.version===8).checksum,'3158aaa4fd3d5dc4e7dd8e37c59135cb')
     importPortable(b.db,b.config,payload,checksum,{backup:false,nowMs:a.now()})
     assert.deepEqual(continuousAffect(b.repos,b.config,'p',a.now()).relationship,continuousAffect(a.repos,a.config,'p',a.now()).relationship)

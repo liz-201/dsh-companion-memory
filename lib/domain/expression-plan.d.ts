@@ -2,8 +2,10 @@ import type { AffectSnapshot } from './types.js';
 import { type PersonalityProfile } from './personality-profile.js';
 import { type TaskMode } from '../expression/task-mode.js';
 import type { ContinuousAffectState } from './continuous-affect.js';
+import type { IntimacyIntent } from '../expression/intimacy-policy.js';
 export interface ExpressionPlan {
     continuous?: ContinuousAffectState;
+    intimacyIntent?: IntimacyIntent;
     ruleVersion: string;
     principalId: string;
     personalityRevisionId: string;

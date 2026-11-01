@@ -17,17 +17,18 @@ import { sharedOwnerPrincipal, unifyOwnerState } from './shared-owner.js'
 import { parseAppraisals } from '../domain/emotion-appraisal.js'
 import { matchSourceQuote } from '../memory/quote-match.js'
 import { retractEmotionAppraisal } from './continuous-affect.js'
-import { humanSourceSql } from '../memory/source-policy.js'
+import { humanSourceSql, isHumanMessage } from '../memory/source-policy.js'
 
 const TABLES: Record<string, readonly string[]> = {
   companions: ['id'], principals: ['id'], conversations: ['id'], identity_links: ['namespace', 'external_key'], owner_channels: ['conversation_id'],
-  raw_messages: ['id'], response_events: ['id'], emotion_appraisals: ['id'], emotion_appraisal_revisions:['id'],turns: ['id'], appraisals: ['id'], relationship_episodes: ['id'], affect_events: ['id'], affect_snapshots: ['principal_id'],
+  raw_messages: ['id'], intimacy_stop_events: ['id'], response_events: ['id'], emotion_appraisals: ['id'], emotion_appraisal_revisions:['id'],turns: ['id'], appraisals: ['id'], relationship_episodes: ['id'], affect_events: ['id'], affect_snapshots: ['principal_id'],
   memories: ['id'], memory_evidence: ['memory_id', 'message_id'], memory_edges: ['from_id', 'to_id', 'relation'], tasks: ['id'], outbox: ['id'],
   topic_checkpoints: ['id'], background_jobs: ['id'], deletion_tombstones: ['id'], audit_events: [], plugin_settings: ['key'],
   personality_profiles: ['revision_id'], personality_heads: ['companion_id', 'persona_id'], episodic_annotations: ['id'], expression_habits: ['id'], memory_lifecycle: ['memory_id'], proactive_feedback: ['id'], proactive_ownership: ['companion_id'],
 }
 const V2_TABLES = new Set(['personality_profiles', 'personality_heads', 'episodic_annotations', 'expression_habits', 'memory_lifecycle', 'proactive_feedback', 'proactive_ownership'])
 const V3_TABLES = new Set(['response_events','emotion_appraisals','emotion_appraisal_revisions'])
+const V7_TABLES = new Set(['intimacy_stop_events'])
 const DERIVED = new Set(['affect_snapshots', 'relationship_episodes'])
 const MAX_BYTES = 256 * 1024 * 1024
 const CHECKPOINT_LIMIT = 8
@@ -37,8 +38,8 @@ type Inventory = Record<string, Record<string, string>>
 interface Checkpoint { id: string; inventory: Inventory }
 export interface PortablePayload {
   format: 'dsh-companion-transfer'
-  version: 1 | 2 | 3 | 4 | 5 | 6
-  formatVersion?: 2 | 3 | 4 | 5 | 6
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7
+  formatVersion?: 2 | 3 | 4 | 5 | 6 | 7
   minReaderVersion?: string
   id: string
   createdAtMs: number
@@ -73,7 +74,7 @@ function sourceInventory(payload: PortablePayload): Inventory {
   // must never change the identity of a previously recorded source checkpoint.
   const legacyEmotion = payload.version < 3 || payload.version === 3 && !payload.schema.some(row => row.version >= 8)
   return inventory(Object.fromEntries(Object.entries(payload.tables).filter(([table]) =>
-    !(payload.version === 1 && V2_TABLES.has(table)) && !(legacyEmotion && V3_TABLES.has(table)))))
+    !(payload.version === 1 && V2_TABLES.has(table)) && !(legacyEmotion && V3_TABLES.has(table)) && !(payload.version < 7 && V7_TABLES.has(table)))))
 }
 
 /** Bound lineage metadata; free pages are reused without vacuuming a live DB. */
@@ -156,13 +157,11 @@ export function exportPortable(db: Database, config: Config, file: string, optio
   // envelope before any old reader can partially merge it or discard evidence.
   const payload = db.transaction((): PortablePayload => {
     const tables = snapshotForTransfer(db)
-    const extended = [...tables['emotion_appraisals'] ?? [], ...tables['emotion_appraisal_revisions'] ?? []].some(row => {
-      const vector = JSON.parse(String(row['vector_json'])) as Record<string, unknown>
-      return ['concern','topic','situation','unresolved'].some(key => vector[key] !== undefined)
-    })
-    const version = extended ? 6 : 5
+    // Schema 10 introduces portable stop controls and new cue semantics. Earlier
+    // readers must reject the whole envelope before any partial merge.
+    const version = 7
     return {
-    format: 'dsh-companion-transfer', version, formatVersion: version, minReaderVersion: extended ? '0.3.0-dev.14' : '0.3.0-dev.10', id, createdAtMs: nowMs, companionId: config.companion.id, ownerId,
+    format: 'dsh-companion-transfer', version, formatVersion: version, minReaderVersion: '0.3.0-dev.15', id, createdAtMs: nowMs, companionId: config.companion.id, ownerId,
     schema: db.all<{ version: number; checksum: string }>('SELECT version, checksum FROM schema_migrations ORDER BY version'),
     ancestors: db.all<{ id: string; inventory_json: string }>('SELECT id, inventory_json FROM portable_checkpoints ORDER BY created_at_ms DESC, rowid DESC LIMIT 8').reverse().map(row => ({ id: row.id, inventory: JSON.parse(row.inventory_json) as Inventory })),
     tables, plugin: {},
@@ -187,18 +186,34 @@ export function exportPortable(db: Database, config: Config, file: string, optio
 export function readPortable(file: string): { payload: PortablePayload; checksum: string } {
   if (statSync(file).size > MAX_BYTES * 2) throw new Error('Transfer file too large')
   const envelope = JSON.parse(readFileSync(file, 'utf8')) as { format?: string; version?: number; sha256?: string; data?: string }
-  if (envelope.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6].includes(Number(envelope.version)) || typeof envelope.data !== 'string' || envelope.data.length > MAX_BYTES * 2) throw new Error('Unsupported transfer package')
+  if (envelope.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6, 7].includes(Number(envelope.version)) || typeof envelope.data !== 'string' || envelope.data.length > MAX_BYTES * 2) throw new Error('Unsupported transfer package')
   const bytes = gunzipSync(Buffer.from(envelope.data, 'base64'), { maxOutputLength: MAX_BYTES })
   const checksum = createHash('sha256').update(bytes).digest('hex')
   if (checksum !== envelope.sha256) throw new Error('Transfer checksum mismatch; no data imported')
   const payload = JSON.parse(bytes.toString('utf8')) as PortablePayload
-  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6].includes(payload.version) || payload.version !== envelope.version || typeof payload.id !== 'string' || typeof payload.ownerId !== 'string' || !payload.tables || !Array.isArray(payload.ancestors)) throw new Error('Invalid transfer payload')
+  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6, 7].includes(payload.version) || payload.version !== envelope.version || typeof payload.id !== 'string' || typeof payload.ownerId !== 'string' || !payload.tables || !Array.isArray(payload.ancestors)) throw new Error('Invalid transfer payload')
   for (const table of Object.keys(payload.tables)) if (!Object.hasOwn(TABLES, table) || !Array.isArray(payload.tables[table])) throw new Error(`Unsupported transfer table: ${table}`)
   for (const table of Object.keys(TABLES)) if (!Array.isArray(payload.tables[table])) {
-    if (payload.version === 1 && V2_TABLES.has(table) || V3_TABLES.has(table) && (payload.version < 3 || payload.version === 3 && !payload.schema.some(row => row.version >= 8))) payload.tables[table] = []
+    if (payload.version === 1 && V2_TABLES.has(table) || V3_TABLES.has(table) && (payload.version < 3 || payload.version === 3 && !payload.schema.some(row => row.version >= 8)) || payload.version < 7 && V7_TABLES.has(table)) payload.tables[table] = []
     else throw new Error(`Transfer table missing: ${table}`)
   }
+  assertIntimacyFormat(payload)
   return { payload, checksum }
+}
+
+function assertIntimacyFormat(payload: PortablePayload): void {
+  if(payload.version>=7&&!Array.isArray(payload.tables['intimacy_stop_events']))throw Error('Transfer table missing: intimacy_stop_events')
+  if(payload.version<7&&(payload.tables['intimacy_stop_events']?.length??0)>0)throw Error('Intimacy controls require transfer version 7')
+  if(payload.version<7)for(const table of ['emotion_appraisals','emotion_appraisal_revisions'])for(const row of payload.tables[table]??[]){
+    if(JSON.parse(String(row['vector_json']))?.eroticCue!==undefined)throw Error('Erotic cues require transfer version 7')
+  }
+}
+function validateStopRow(row: Row): void {
+  if(typeof row['id']!=='string'||!row['id']||row['id'].length>1024
+    ||typeof row['principal_id']!=='string'||!row['principal_id']||row['principal_id'].length>1024
+    ||row['source_message_id']!==null&&(typeof row['source_message_id']!=='string'||!row['source_message_id']||row['source_message_id'].length>1024)
+    ||!Number.isSafeInteger(row['created_at_ms'])||Number(row['created_at_ms'])<0
+    ||typeof row['origin_device_id']!=='string'||!row['origin_device_id']||row['origin_device_id'].length>1024)throw Error('Invalid intimacy stop control')
 }
 
 /** Extract only package-owned files into a new directory. Never touches a DSH profile or credentials. */
@@ -232,7 +247,9 @@ function writeRow(db: Database, table: string, row: Row, existing?: Row): void {
 }
 
 export function importPortable(db: Database, config: Config, payload: PortablePayload, checksum: string, options: { nowMs?: number; resumeReminders?: boolean; backup?: boolean; recordedTombstones?: boolean } = {}): ImportReport {
-  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6].includes(payload.version)) throw new Error('Unsupported transfer package version')
+  if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6, 7].includes(payload.version)) throw new Error('Unsupported transfer package version')
+  assertIntimacyFormat(payload)
+  if(payload.version<7&&!payload.tables['intimacy_stop_events'])payload={...payload,tables:{...payload.tables,intimacy_stop_events:[]}}
   const nowMs = options.nowMs ?? Date.now()
   const repos = new Repositories(db)
   const report: ImportReport = { inserted: 0, updated: 0, deleted: 0, conflicts: 0, alreadyImported: false, backup: null, pausedTasks: 0, lineageMissing: false }
@@ -252,6 +269,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
     for (const row of rows) {
       if (!row || typeof row !== 'object' || Array.isArray(row) || Object.entries(row).some(([column, value]) => !columns.has(column) || value !== null && typeof value !== 'string' && typeof value !== 'number')) throw new Error(`Invalid transfer row in ${table}`)
       const key = keyFor(table, row)
+      if(table==='intimacy_stop_events')validateStopRow(row)
       if (table === 'emotion_appraisals') {
         parseAppraisals([JSON.parse(String(row['vector_json']))])
         if(!Number.isInteger(row['slot'])||Number(row['slot'])<0||Number(row['slot'])>3||row['id']!==`emotion:${row['source_message_id']}:${row['slot']}`||!['active','retracted'].includes(String(row['status'])))throw Error('Invalid emotion identity')
@@ -323,6 +341,15 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
         if (table === 'plugin_settings' && raw['key'] === 'memory.owner-merge-version' && repos.getSetting('memory.owner-merge-version') === '1' && raw['value'] !== '1') continue
         const row = { ...raw }
         const existing = current.get(key) ?? (table === 'response_events' ? db.get('SELECT * FROM response_events WHERE id=?', raw['id']) : undefined)
+        if(table==='intimacy_stop_events'){
+          // Stop controls are a union, never deletions inferred from lineage.
+          if(existing){
+            if(['principal_id','created_at_ms','origin_device_id'].some(column=>existing[column]!==row[column])
+              ||existing['source_message_id']!==null&&row['source_message_id']!==null&&existing['source_message_id']!==row['source_message_id'])throw Error('Conflicting intimacy stop control')
+            if(existing['source_message_id']!==null&&row['source_message_id']===null){writeRow(db,table,row,existing);report.updated++}
+          }else{writeRow(db,table,row);report.inserted++}
+          continue
+        }
         if (table === 'deletion_tombstones') {
           const selector = JSON.parse(String(row['selector_json'])) as { kind?: string; recordedOnly?: boolean }
           const previousSelector = existing ? JSON.parse(String(existing['selector_json'])) as { recordedOnly?: boolean } : undefined
@@ -427,7 +454,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
         if (existing) report.updated++; else report.inserted++
       }
       for (const [key, row] of current) if (base[table]?.[key] && !incoming.has(key)) {
-        if (['outbox', 'background_jobs', 'personality_profiles', 'personality_heads', 'proactive_feedback', 'proactive_ownership'].includes(table)) continue
+        if (['outbox', 'background_jobs', 'personality_profiles', 'personality_heads', 'proactive_feedback', 'proactive_ownership', 'intimacy_stop_events'].includes(table)) continue
         if (hash(row) === base[table]![key]) deletes.push({ table, row })
         else if (!DERIVED.has(table)) conflicts(table, key, row, undefined, base[table]![key])
       }
@@ -444,6 +471,14 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
     repos.ensurePrincipal(shared, config.companion.id, 'owner', payload.ownerId, nowMs)
     // An older device may still upload partitioned roles. Normalize inside this same import transaction.
     unifyOwnerState(repos, config, payload.ownerId, nowMs, { backup: false })
+    for(const row of db.all<{id:string;principal_id:string;source_message_id:string|null;created_at_ms:number}>('SELECT id,principal_id,source_message_id,created_at_ms FROM intimacy_stop_events')){
+      if(row.source_message_id===null)continue
+      const source=repos.getRawMessage(row.source_message_id)
+      const owner=source&&db.get<{principal_id:string;kind:string}>('SELECT principal_id,kind FROM conversations WHERE id=?',source.conversationId)
+      if(!source||source.role!=='user'||owner?.principal_id!==row.principal_id||owner.kind!=='private'||source.occurredAtMs!==row.created_at_ms)throw Error('Intimacy stop source is outside owner scope')
+      if(source.deletedAtMs!==null)db.run('UPDATE intimacy_stop_events SET source_message_id=NULL WHERE id=?',row.id)
+      else if(!isHumanMessage(source))throw Error('Intimacy stop source is not a human message')
+    }
     for (const row of db.all<{ id: string; principal_id: string; source_message_id: string }>("SELECT id,principal_id,source_message_id FROM emotion_appraisals WHERE status='active'")) {
       const setting = repos.getSetting(`emotion.retracted:${row.id}`)
       if (!setting) continue
@@ -460,6 +495,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
       if(row.status!=='active')continue
       const vector=parseAppraisals([JSON.parse(row.vector_json)])[0]!
       if(!matchSourceQuote(source.content,vector.quote))throw Error('Emotion source quote mismatch')
+      if(vector.eroticCue&&!matchSourceQuote(source.content,vector.eroticCue.quote))throw Error('Erotic cue source quote mismatch')
       if(vector.suppliedEvidenceRef){
         const prior=db.get<{principal_id:string;event_time_ms:number;vector_json:string;status:string}>('SELECT principal_id,event_time_ms,vector_json,status FROM emotion_appraisals WHERE id=?',vector.suppliedEvidenceRef)
         if(prior&&(prior.principal_id!==row.principal_id||prior.event_time_ms>=row.event_time_ms||JSON.parse(prior.vector_json).prospect!=='pending'))throw Error('Invalid portable emotion reference')
@@ -477,7 +513,14 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
     db.run(`UPDATE conversations SET latest_inbound_seq = COALESCE((SELECT MAX(r.seq) FROM raw_messages r WHERE r.conversation_id = conversations.id AND ${humanSourceSql('r')}), 0)`)
     if (!repos.getSetting('local.device-id')) repos.setSetting('local.device-id', randomUUID(), nowMs)
     // Tombstones override a stale copy's facts, including after a three-way branch merge.
-    for (const tombstone of db.all<{ affected_ids_json: string; selector_json: string; principal_id: string }>('SELECT affected_ids_json, selector_json, principal_id FROM deletion_tombstones')) {
+    for (const tombstone of db.all<{ affected_ids_json: string; selector_json: string; principal_id: string; created_at_ms:number }>('SELECT affected_ids_json, selector_json, principal_id,created_at_ms FROM deletion_tombstones')) {
+      const controlSelector=JSON.parse(tombstone.selector_json) as {kind?:string;recordedOnly?:boolean}
+      if(controlSelector.kind==='all'){
+        if(!controlSelector.recordedOnly)db.run('DELETE FROM intimacy_stop_events WHERE principal_id=? AND created_at_ms<=?',tombstone.principal_id,tombstone.created_at_ms)
+        for(const id of JSON.parse(tombstone.affected_ids_json) as string[])db.run('DELETE FROM intimacy_stop_events WHERE id=? AND principal_id=?',id,tombstone.principal_id)
+        // A stale all-delete cannot cancel a later explicit local opt-in.
+        db.run('DELETE FROM plugin_settings WHERE key IN (?,?) AND updated_at_ms<=?',`local.eroticPolicy:${tombstone.principal_id}`,`local.intimacy-expression:${tombstone.principal_id}`,tombstone.created_at_ms)
+      }
       const suppressedIds = db.all<{ id: string; claim: string; object_json: string | null }>('SELECT id, claim, object_json FROM memories WHERE principal_id = ?', tombstone.principal_id).filter(memory => suppressedBy(tombstone.selector_json, { id: memory.id, claim: memory.claim, object: memory.object_json === null ? null : JSON.parse(memory.object_json), sourceIds: repos.memoryEvidence(memory.id).map(item => item.messageId) })).map(memory => memory.id)
       for (const id of new Set([...(JSON.parse(tombstone.affected_ids_json) as string[]), ...suppressedIds])) {
       const memory = repos.getMemory(id)
@@ -491,6 +534,7 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
         db.run('DELETE FROM memories WHERE id = ? AND principal_id = ?', id, tombstone.principal_id)
       }
       if (ownMessage) {
+        db.run('UPDATE intimacy_stop_events SET source_message_id=NULL WHERE source_message_id=? AND principal_id=?',id,tombstone.principal_id)
         db.run('DELETE FROM memory_evidence WHERE message_id = ?', id)
         db.run('UPDATE raw_messages SET content = ?, deleted_at_ms = COALESCE(deleted_at_ms, ?) WHERE id = ?', '', nowMs, id)
         deletionRebuild.add(tombstone.principal_id)

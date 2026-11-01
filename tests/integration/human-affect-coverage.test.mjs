@@ -159,7 +159,7 @@ test('embarrassment needs an actual prior assistant behavior and reaches the gen
   }finally{f.close()}
 })
 
-test('extended feelings survive v6 sync, repeated import, correction and deletion without revival',()=>{
+test('extended feelings survive v7 sync, repeated import, correction and deletion without revival',()=>{
   const a=fixture(),b=fixture()
   try{
     for(const f of[a,b])f.repos.setSetting('owner.id','same-owner',f.now())
@@ -169,8 +169,8 @@ test('extended feelings survive v6 sync, repeated import, correction and deletio
     const file=join(a.directory,'rich.json')
     exportPortable(a.db,a.config,file,{includePlugin:false})
     const {payload,checksum}=readPortable(file)
-    assert.equal(payload.version,6)
-    assert.equal(payload.minReaderVersion,'0.3.0-dev.14')
+    assert.equal(payload.version,7)
+    assert.equal(payload.minReaderVersion,'0.3.0-dev.15')
     importPortable(b.db,b.config,payload,checksum,{backup:false})
     assert.equal(importPortable(b.db,b.config,payload,checksum,{backup:false}).alreadyImported,true)
     const principal=b.db.get("SELECT principal_id FROM emotion_appraisals WHERE source_message_id='sync-frustration'").principal_id

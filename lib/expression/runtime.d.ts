@@ -10,8 +10,12 @@ export declare class ExpressionRuntime {
     private readonly callModel?;
     private plans;
     private exposure;
+    private intimacyPlans;
+    private intimacyDeliveries;
     constructor(repos: Repositories, config: Config, callModel?: ModelCaller | undefined);
-    plan(state: AffectSnapshot, userText: string, nowMs: number): ExpressionPlan;
+    plan(state: AffectSnapshot, userText: string, nowMs: number, binding?: IdentityBinding): ExpressionPlan;
+    /** Called only by actual delivery ingress, never by preview or plan reads. */
+    recordDelivery(binding: IdentityBinding, text: string, nowMs: number): void;
     private contactExposure;
     guard(text: string, state: AffectSnapshot, userText: string, nowMs: number, signal?: AbortSignal, sourceIds?: string[], binding?: IdentityBinding): Promise<GuardResult>;
 }

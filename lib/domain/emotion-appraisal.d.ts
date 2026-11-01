@@ -29,6 +29,17 @@ export interface EmotionAppraisal {
     relationshipThreat?: number;
     personalAttention?: number;
     helplessness?: number;
+    /**
+     * Optional adult-intimacy cue. The model proposes it; the host re-qualifies the
+     * clause before any of it can reach a state. Never a substitute for `pull`.
+     */
+    eroticCue?: {
+        kind: 'interest' | 'stop';
+        /** interest only, finite [0,1]; a stop must not carry one. */
+        strength?: number;
+        /** A whole clause of the current owner message, verbatim. */
+        quote: string;
+    };
     quote: string;
     confidence: number;
 }

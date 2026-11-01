@@ -26,7 +26,8 @@ import { personalityPreset } from '../domain/personality.js'
 import { dailyUsage, rebuildAffect } from '../domain/affect-projector.js'
 import { saveEmotionAppraisals, priorExpectations, priorBehaviors, continuousAffect } from '../storage/continuous-affect.js'
 import { continuousMood, retrievalArousal } from '../domain/continuous-mood.js'
-import { EMOTION_CONTRACT, parseObservation } from './emotion-observation.js'
+import { buildEmotionContract, parseObservation } from './emotion-observation.js'
+import { readEroticPolicy, observeIntimacyStop, hasRecentIntimacyIntent, isEroticCharacterConfirmed } from '../storage/erotic-interest.js'
 import { perceptionContext } from './perception-context.js'
 import type { EmotionAppraisal } from '../domain/emotion-appraisal.js'
 import { emptyDelta, transition, worthMentioning } from '../domain/episode-manager.js'
@@ -190,7 +191,9 @@ export class TurnCoordinator {
     let timer:ReturnType<typeof setTimeout>,usage:ModelChunk['usage']
     const execute=async():Promise<void>=>{
       let output=''
-      const systemText=EMOTION_CONTRACT
+      const intimacyPolicy=readEroticPolicy(deps.repos,binding.principalId)
+      const includeEroticCue=intimacyPolicy.enabled&&isEroticCharacterConfirmed(deps.repos,binding.principalId,binding.conversationId)&&!intimacyPolicy.stopped&&binding.visibility==='private'
+      const systemText=buildEmotionContract(includeEroticCue)
       const input={outputContract:'<observation>{"v":3,"legacy":{"v":1,"e":[]},"appraisals":[]}</observation>',userMessage:message.content.slice(0,8000),recentContext:deps.repos.recentRawMessages(message.conversationId,6,message.seq).filter(row=>row.role==='assistant'||isHumanMessage(row)).map(row=>({role:row.role,text:row.content.slice(0,180)})),priorExpectations:priorExpectations(deps.repos,binding.principalId,message.occurredAtMs),priorBehaviors:priorBehaviors(deps.repos,binding.principalId,message),...(previousError?{correction:previousError.slice(0,700)}:{})}
       while(input.recentContext.length&&this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens)input.recentContext.shift()
       while(this.counter.count(systemText)+this.counter.count(JSON.stringify(input))+16>deps.config.memory.inputHardLimitTokens&&(input.priorBehaviors.length||input.priorExpectations.length)){
@@ -207,6 +210,9 @@ export class TurnCoordinator {
       const current=deps.repos.db.isOpen?deps.repos.getRawMessage(message.id):null
       if(controller.signal.aborted||options.active?.()===false||!current||current.deletedAtMs!==null||current.content!==message.content)return
       const parsed=parseObservation(output)
+      if(!includeEroticCue||readEroticPolicy(deps.repos,binding.principalId).revision!==intimacyPolicy.revision){
+        for(const a of parsed.appraisals??[])delete a.eroticCue
+      }
       await this.observe(binding,current,parsed.legacy,{...(parsed.appraisals?{appraisals:parsed.appraisals}:{}),skipLegacy:message.sourceKind==='qq'})
       if(!controller.signal.aborted) {
         this.strategyObservations.set(message.id, { signature, appraisals: observationStrategyAppraisals(parsed.legacy, current) })
@@ -312,6 +318,7 @@ export class TurnCoordinator {
         return { ...base, status: 'skipped', problems: ['duplicate-inbound'], durationMs: this.clock.now() - startedAt }
       }
       if (!isHumanMessage(message)) return { ...base, status: 'skipped', problems: ['non-human-source'], durationMs: this.clock.now() - startedAt }
+      observeIntimacyStop(this.deps.repos,binding,message,startedAt,hasRecentIntimacyIntent(this.deps.repos,binding.principalId,startedAt))
       if(message.sourceKind==='qq'&&binding.visibility==='private')this.deps.background?.enqueue('extract',{messageId:message.id},{dedupKey:`observe:${message.id}`,principalId:binding.principalId,availableAtMs:startedAt+1000,nowMs:startedAt})
     } catch (error) {
       return { ...base, status: 'failed', error: describeError(error), durationMs: this.clock.now() - startedAt }
@@ -381,6 +388,7 @@ export class TurnCoordinator {
         sent = { kind: 'unknown', code: 'transport-threw', atMs: this.clock.now() }
       }
       deps.repos.finishOutbox(id, sent)
+      if(sent.kind==='accepted'||sent.kind==='unknown')this.expression.recordDelivery(binding,say,this.clock.now())
       deps.repos.insertRawMessage({ id: `${conversationId}:out:${turnId}`, conversationId,
         platformMessageKey: sent.platformMessageId ?? null, role: 'assistant', sourceKind: 'companion', content: say,
         occurredAtMs: this.clock.now(), observedAtMs: this.clock.now(), deliveryStatus: sent.kind, deletedAtMs: null })
@@ -416,7 +424,7 @@ export class TurnCoordinator {
         .map(row => ({ id: row.id, text: row.content, role: row.role }))
       const prompts = deps.prompts.load(personalityPreset(deps.repos, deps.config, binding.principalId))
       const built = buildContext({ persona: prompts.persona, protocol: prompts.protocol, boundaries, snapshot, recent,
-        userText: inbound.text, strategy: [deps.config.expression.mode === 'enforce' ? CORE_POLICY : '', `【本轮倾向】${strategy.prior}`, deps.config.integration.naturalExpression ? renderPlan(this.expression.plan(snapshot, inbound.text, now)) : '',
+        userText: inbound.text, strategy: [deps.config.expression.mode === 'enforce' ? CORE_POLICY : '', `【本轮倾向】${strategy.prior}`, deps.config.integration.naturalExpression ? renderPlan(this.expression.plan(snapshot, inbound.text, now,binding)) : '',
           deps.config.integration.naturalExpression ? renderInteractionHabits(deps.repos, binding, now) : '',perceptionContext(deps.repos,deps.config,binding,inbound.text,now)].filter(Boolean).join('\n'),
         memoryItems: retrieval.selected, checkpoint: renderCheckpoint(parseCheckpoint(deps.repos.currentCheckpoint(conversationId)?.['summary_json'])),
         counter: this.counter, memoryConfig: deps.config.memory })

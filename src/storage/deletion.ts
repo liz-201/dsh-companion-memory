@@ -47,6 +47,7 @@ export function deleteScope(
   const removedMemories: string[] = []
   const removedMessages: string[] = []
   const suppressed: MemorySuppression[] = []
+  const removedControls: string[] = []
   let retracted = 0
   let clearedCheckpoints = 0
   let cancelledTasks = 0
@@ -66,6 +67,9 @@ export function deleteScope(
       db.run("UPDATE tasks SET status = 'cancelled' WHERE id = ? AND status IN ('proposed','confirmed')", selector.taskId)
       cancelledTasks += 1
     } else {
+      removedControls.push(...db.all<{id:string}>('SELECT id FROM intimacy_stop_events WHERE principal_id=?',principalId).map(row=>row.id))
+      db.run('DELETE FROM intimacy_stop_events WHERE principal_id=?',principalId)
+      db.run('DELETE FROM plugin_settings WHERE key IN (?,?)',`local.eroticPolicy:${principalId}`,`local.intimacy-expression:${principalId}`)
       for (const row of db.all<{ id: string }>('SELECT id FROM memories WHERE principal_id = ?', principalId)) {
         memoryIds.add(row.id)
       }
@@ -93,6 +97,7 @@ export function deleteScope(
     }
 
     for (const messageId of removedMessages) {
+      db.run('UPDATE intimacy_stop_events SET source_message_id=NULL WHERE source_message_id=? AND principal_id=?',messageId,principalId)
       db.run('DELETE FROM memory_evidence WHERE message_id = ?', messageId)
       db.run("UPDATE raw_messages SET content = '', deleted_at_ms = ? WHERE id = ? AND deleted_at_ms IS NULL", nowMs, messageId)
     }
@@ -130,7 +135,7 @@ export function deleteScope(
       id: tombstoneId,
       principalId,
       selector: { ...selector, suppressed },
-      affectedIds: [...removedMemories, ...removedMessages],
+      affectedIds: [...removedMemories, ...removedMessages,...removedControls],
       createdAtMs: nowMs,
     })
     repos.audit({
@@ -182,6 +187,12 @@ export function replayTombstones(db: Database, repos: Repositories, nowMs: numbe
         db.run("UPDATE relationship_episodes SET status = 'archived' WHERE id = ? AND principal_id = ?", selector.episodeId, principalId)
       }
       if (selector.kind === 'task') db.run("UPDATE tasks SET status = 'cancelled' WHERE id = ? AND principal_id = ? AND status IN ('proposed','confirmed')", selector.taskId, principalId)
+      if (selector.kind === 'all') {
+        const deletedAt=Number(row['created_at_ms'])
+        for(const id of ids)db.run('DELETE FROM intimacy_stop_events WHERE id=? AND principal_id=?',id,principalId)
+        if(!selector.recordedOnly)db.run('DELETE FROM intimacy_stop_events WHERE principal_id=? AND created_at_ms<=?',principalId,deletedAt)
+        db.run('DELETE FROM plugin_settings WHERE key IN (?,?) AND updated_at_ms<=?',`local.eroticPolicy:${principalId}`,`local.intimacy-expression:${principalId}`,deletedAt)
+      }
       if (selector.kind === 'all' && !selector.recordedOnly) {
         for (const row of db.all<{ id: string }>('SELECT id FROM raw_messages WHERE conversation_id IN (SELECT id FROM conversations WHERE principal_id = ?)', principalId)) ids.add(row.id)
         clearCheckpoints(db, principalId)
@@ -205,6 +216,7 @@ export function replayTombstones(db: Database, repos: Repositories, nowMs: numbe
         }
         if (!db.get('SELECT r.id FROM raw_messages r JOIN conversations c ON c.id = r.conversation_id WHERE r.id = ? AND c.principal_id = ?', id, principalId)) continue
         db.run('DELETE FROM memory_evidence WHERE message_id = ?', id)
+        db.run('UPDATE intimacy_stop_events SET source_message_id=NULL WHERE source_message_id=? AND principal_id=?',id,principalId)
         db.run("UPDATE raw_messages SET content = '', deleted_at_ms = COALESCE(deleted_at_ms, ?) WHERE id = ?", nowMs, id)
         db.run("UPDATE affect_events SET status = 'retracted' WHERE principal_id = ? AND status = 'active' AND (appraisal_id IN (SELECT id FROM appraisals WHERE source_message_id = ?) OR json_extract(payload_json, '$.appraisal.sourceMessageId') = ?)", principalId, id, id)
         db.run("UPDATE appraisals SET status = 'retracted' WHERE source_message_id = ?", id)

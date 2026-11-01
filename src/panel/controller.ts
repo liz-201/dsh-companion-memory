@@ -19,6 +19,7 @@ import type { WindowPerception } from '../runtime/window-perception.js'
 import { continuousAffect,retractEmotionAppraisal } from '../storage/continuous-affect.js'
 import { emotionTimeline } from '../storage/emotion-timeline.js'
 import { humanSourceSql } from '../memory/source-policy.js'
+import { readEroticPolicy, eroticAffect, setEroticPolicy, recordIntimacyStop, isEroticCharacterConfirmed } from '../storage/erotic-interest.js'
 
 export interface PanelControls { snapshot(input: { conversationId?: string; query?: string }): unknown; action(input: unknown): unknown | Promise<unknown> }
 interface PanelOptions {
@@ -61,7 +62,11 @@ export class PluginPanel implements PanelControls {
     const state = projectSnapshot(stored?.snapshot ?? initialSnapshot(principalId, config.companion.preset, config.affect.ruleVersion, now), now, config.affect)
     const profile = new PersonalityProfiles(repos).get(config.companion.id, selected?.personaId ?? 'builtin')
     const query = (input.query ?? '').slice(0, 200).toLowerCase()
-    return { continuous: continuousAffect(repos,config,principalId,now), emotionTimeline: emotionTimeline(repos,config,principalId,now), emotion: config.emotion, perception: {settings:config.perception,status:this.options.perception?.status()??null}, runtime: this.options.status(), conversations: conversations.map(row => ({ id: row.id, personaId: row.personaId, label: `${row.personaId} · ${row.platform_conversation_id.slice(-60)}`, available: row.available })), selected: conversationId, state, profile, frequency: proactiveFrequency(config, repos, principalId), gates: checkGates({ config, repos, principalId, conversationId, nowMs: now }), proactive: { ...config.proactive, modelInterests: companionInterests(repos, config, principalId), enabled: (repos.getSetting('proactive.enabled') ?? (config.proactive.enabled ? '1' : '0')) === '1' }, computer: { settings: config.computerEvents, status: computer.status(), recent: computer.recent() },
+    const policy=readEroticPolicy(repos,principalId),characterContextId=repos.getSetting(`local.session-persona:${conversationId}`)??'builtin'
+    const contextMatches=policy.characterContextId===characterContextId
+    const erotic=eroticAffect(repos,principalId,now)
+    const eroticState=!isEroticCharacterConfirmed(repos,principalId,conversationId)&&!policy.stopped?{...erotic,value:null,blocked:true,blockReason:'adult-context-unknown' as const}:erotic
+    return { eroticPolicy:{...policy,characterAdultConfirmed:contextMatches&&policy.characterAdultConfirmed,adultsConfirmed:contextMatches&&policy.adultsConfirmed},eroticState,continuous: continuousAffect(repos,config,principalId,now), emotionTimeline: emotionTimeline(repos,config,principalId,now), emotion: config.emotion, perception: {settings:config.perception,status:this.options.perception?.status()??null}, runtime: this.options.status(), conversations: conversations.map(row => ({ id: row.id, personaId: row.personaId, label: `${row.personaId} · ${row.platform_conversation_id.slice(-60)}`, available: row.available })), selected: conversationId, state, profile, frequency: proactiveFrequency(config, repos, principalId), gates: checkGates({ config, repos, principalId, conversationId, nowMs: now }), proactive: { ...config.proactive, modelInterests: companionInterests(repos, config, principalId), enabled: (repos.getSetting('proactive.enabled') ?? (config.proactive.enabled ? '1' : '0')) === '1' }, computer: { settings: config.computerEvents, status: computer.status(), recent: computer.recent() },
       memories: repos.activeMemories(principalId, ['episode', 'fact', 'preference', 'interaction_rule', 'hypothesis'], 200).filter(row => row.visibility === 'private' && (!query || row.claim.toLowerCase().includes(query))).slice(0, 100),
       habits: db.all('SELECT id, kind, value_json, status FROM expression_habits WHERE principal_id = ? ORDER BY valid_from_ms DESC LIMIT 30', principalId),
       tasks: db.all('SELECT id, kind, content, status, due_at_ms FROM tasks WHERE principal_id = ? ORDER BY created_at_ms DESC LIMIT 40', principalId),
@@ -96,6 +101,20 @@ export class PluginPanel implements PanelControls {
       return this.options.probeAffect(text(body['caseId'],80),contract)
     }
     const binding = this.binding(typeof body['conversationId'] === 'string' ? body['conversationId'] : undefined)
+    if(action==='intimacy-settings'){
+      const input=object(body['policy'])
+      if(body['confirmed']!==true)throw new PanelInputError('请明确确认本机亲密表达范围。')
+      if(['enabled','ownerAdultConfirmed','characterAdultConfirmed'].some(key=>typeof input[key]!=='boolean')||Object.keys(input).some(key=>!['enabled','ownerAdultConfirmed','characterAdultConfirmed'].includes(key)))throw new PanelInputError('请使用明确的开关与成年人确认。')
+      if(input['enabled']===true&&(!config.emotion.enabled||config.expression.mode!=='enforce'))throw new PanelInputError('请先启用连续情绪和表达守卫，再开启本模块。')
+      const knownStopIds=body['knownStopIds']
+      if(knownStopIds!==undefined&&(!Array.isArray(knownStopIds)||knownStopIds.some(id=>typeof id!=='string')))throw new PanelInputError('停止状态已变化，请刷新后重试。')
+      const policy=setEroticPolicy(repos,binding.principalId,{enabled:input['enabled'] as boolean,ownerAdultConfirmed:input['ownerAdultConfirmed'] as boolean,characterAdultConfirmed:input['characterAdultConfirmed'] as boolean,characterContextId:repos.getSetting(`local.session-persona:${binding.conversationId}`)??'builtin',confirmedResume:body['confirmedResume']===true,...(knownStopIds?{knownStopIds:knownStopIds as string[]}:{})},Date.now())
+      return {text:policy.enabled?'已保存本机成年人范围；仅对当前许可范围使用非露骨表达。':'本机成人亲密表达已关闭。',eroticPolicy:policy}
+    }
+    if(action==='intimacy-stop'){
+      const policy=recordIntimacyStop(repos,binding.principalId,null,Date.now())
+      return {text:'已立即停止本机亲密表达；其他设备联网同步后也会收到停止记录。',eroticPolicy:policy}
+    }
     if(action==='emotion-retract'){
       const id=text(body['id'],500)
       const changes=retractEmotionAppraisal(repos,id,binding.principalId)
