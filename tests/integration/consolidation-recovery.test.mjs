@@ -163,3 +163,21 @@ test('the mounted plugin completes its actual background handler when the model 
 })
 
 function joinForMounted(directory) { return `${directory}/mounted` }
+
+test('re-running a batch at the same cursor refreshes its checkpoint instead of failing on the id', t => {
+  // 现场症状：整批被拒（例如只剩 codex-bridge 消息）时 nextCursor 不前进，同一个
+  // hashKey(conversationId + cursor) 会被反复写入，裸 INSERT 撞主键导致整批事务回滚、
+  // 游标推进一起丢掉，任务重试三次后放弃，该会话从此再也不会被整理。
+  const f = fixture(); t.after(() => f.close())
+  const write = () => f.repos.putCheckpoint({
+    id: 'same-cursor', conversationId: 'c', sessionId: 'background',
+    summary: { topic: '同一游标重跑' }, evidenceIds: [], createdAtMs: f.now(),
+  })
+  write()
+  assert.doesNotThrow(write, '同一 id 重写不应抛 UNIQUE 约束')
+  assert.equal(f.db.get('SELECT COUNT(*) AS n FROM topic_checkpoints').n, 1)
+  assert.equal(f.db.get("SELECT current_flag FROM topic_checkpoints WHERE id = 'same-cursor'").current_flag, 1)
+  assert.equal(f.db.get('SELECT COUNT(*) AS n FROM topic_checkpoints WHERE conversation_id = ? AND current_flag = 1', 'c').n, 1,
+    '同一会话只能有一条 current 检查点')
+})
+
