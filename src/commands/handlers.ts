@@ -11,7 +11,7 @@
  *   - 命令本身**不改关系**：管理命令一律只动配置/派生数据，不动 affect。
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { Config } from '../config.js'
@@ -33,6 +33,9 @@ import type { Metrics } from '../runtime/metrics.js'
 import type { CompatibilityReport } from '../adapters/compatibility.js'
 import { describeCompatibility } from '../adapters/compatibility.js'
 import type { MemoryTransfer } from '../cloud/memory-transfer.js'
+import { inspectDevice } from '../runtime/device-context.js'
+import { renderHereText } from '../storage/device-ledger.js'
+import { activePersonaDocument, listPersonaDocuments, writePersonaDocument } from '../storage/persona-documents.js'
 
 export type FishCommandKind = 'success' | 'error'
 
@@ -102,12 +105,14 @@ const HELP_TEXT = [
   '/fish import <文件路径> — 导入完整记忆文件（owner）',
   '/fish files — 打开记忆导入导出与网盘管理页（owner）',
   '/fish sync — 检查云端并同步（owner）',
+  '/fish persona show | export | import <文件> | adopt <文件> — 人设正文跨机携带（owner）',
+  '/fish here — 这台电脑来过没有、用过哪些工作区',
   '/fish doctor — 自检',
   '/fish review begin friendly|tense|after_conflict / end — 隔离测试场景',
 ].join('\n')
 
 /** 命令名 → 是否需要 owner。 */
-const OWNER_ONLY = new Set(['review', 'personality', 'proactive', 'reset', 'forget', 'correct', 'habits', 'expression', 'export', 'import', 'files', 'sync'])
+const OWNER_ONLY = new Set(['review', 'personality', 'proactive', 'reset', 'forget', 'correct', 'habits', 'expression', 'export', 'import', 'files', 'sync', 'persona'])
 
 function fail(text: string): FishCommandResult {
   return { kind: 'error', text }
@@ -241,6 +246,10 @@ export function handleFishCommand(input: FishCommandInput, deps: FishCommandDeps
         if (deps.transfer.status().enabled) void deps.transfer.sync()
         return ok(`记忆导入完成：新增 ${result.inserted}，更新 ${result.updated}，冲突 ${result.conflicts}。${result.alreadyImported ? '该文件已处理。' : ''}${result.lineageMissing ? '缺少共同历史，差异已保留。' : ''}`, true)
       } catch { return fail('记忆导入失败：请检查文件、版本及所属主人；本地记忆已保留。') }
+    case 'persona':
+      return commandPersona(deps, input, rest)
+    case 'here':
+      return commandHere(deps, input)
     case 'doctor':
       return commandDoctor(deps, input)
     default:
@@ -645,6 +654,59 @@ function commandExport(deps: FishCommandDeps, input: FishCommandInput): FishComm
   return ok(
     `导出好了：${memories.length} 条记忆、${episodes.length} 段关系、${tasks.length} 个任务。\n文件：${file}`,
   )
+}
+
+function commandHere(deps: FishCommandDeps, input: FishCommandInput): FishCommandResult {
+  const device = inspectDevice()
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  return ok(renderHereText(deps.repos, { id: device.id, name: device.name, os: device.os, release: device.release, arch: device.arch, arrival: 'same', timezone }, input.nowMs))
+}
+
+function commandPersona(deps: FishCommandDeps, input: FishCommandInput, rest: readonly string[]): FishCommandResult {
+  const companionId = deps.config.companion.id
+  const action = (rest[0] ?? 'show').toLowerCase()
+  const args = rest.filter((item) => !item.startsWith('--'))
+  if (action === 'show') {
+    const documents = listPersonaDocuments(deps.repos, companionId)
+    if (documents.length === 0) return ok('还没有登记人设正文。宿主没有下发 persona 段时，可以先用 /fish persona import <文件> 导入一份。')
+    return ok(documents.map((doc) => {
+      const head = `${doc.enabled ? '启用' : '停用'}｜${doc.id}｜来源 ${doc.source}｜修订 ${doc.revision}｜${doc.promptText.length} 字`
+      const body = doc.promptText.length > 600 ? `${doc.promptText.slice(0, 600)}\n…（已截断，完整正文用 /fish persona export）` : doc.promptText
+      return `${head}\n${body}`
+    }).join('\n\n'))
+  }
+  if (action === 'export') {
+    const doc = activePersonaDocument(deps.repos, companionId)
+    if (doc === null) return fail('库里还没有人设正文，先让宿主跑一轮，或用 import 导入。')
+    const directory = join(deps.config.storage.directory, 'persona')
+    mkdirSync(directory, { recursive: true })
+    const file = join(directory, `persona-${input.nowMs}.txt`)
+    try {
+      writeFileSync(file, doc.promptText, { encoding: 'utf8', mode: 0o600 })
+    } catch {
+      return fail('写不出导出文件，请检查存储目录权限。')
+    }
+    return ok(`人设正文已导出：${file}\n${doc.promptText.length} 字｜修订 ${doc.revision}\n把这个文件拷到另一台电脑，用 /fish persona import <文件> 导入。`)
+  }
+  if (action === 'import' || action === 'adopt') {
+    const file = args.slice(1).join(' ').replace(/^"|"$/g, '')
+    if (file === '') return fail(`用法：/fish persona ${action} <文件路径>${action === 'import' ? ' [--force]' : ''}`)
+    let text: string
+    try {
+      text = readFileSync(file, 'utf8')
+    } catch {
+      return fail('读不到这个文件，请检查路径。')
+    }
+    if (text.trim() === '') return fail('文件是空的，没有可导入的人设正文。')
+    const force = action === 'adopt' || rest.includes('--force')
+    const result = writePersonaDocument(deps.repos, { id: 'persona:owner', companionId, promptText: text, source: 'imported', nowMs: input.nowMs }, force)
+    if (result.conflict) {
+      return fail(`库里已有一份不同的人设正文（修订 ${result.revision}），没有覆盖。确认要采用这个文件就发：\n/fish persona adopt ${file}`)
+    }
+    if (!result.written) return ok(`人设正文与库里一致，无需改动（修订 ${result.revision}）。`)
+    return ok(`人设正文已写入：修订 ${result.revision}，${text.length} 字。下一轮对话起按这份设定说话。`, true)
+  }
+  return fail('用法：/fish persona show | export | import <文件> [--force] | adopt <文件>')
 }
 
 function commandDoctor(deps: FishCommandDeps, input: FishCommandInput): FishCommandResult {

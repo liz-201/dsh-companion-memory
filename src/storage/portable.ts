@@ -25,10 +25,13 @@ const TABLES: Record<string, readonly string[]> = {
   memories: ['id'], memory_evidence: ['memory_id', 'message_id'], memory_edges: ['from_id', 'to_id', 'relation'], tasks: ['id'], outbox: ['id'],
   topic_checkpoints: ['id'], background_jobs: ['id'], deletion_tombstones: ['id'], audit_events: [], plugin_settings: ['key'],
   personality_profiles: ['revision_id'], personality_heads: ['companion_id', 'persona_id'], episodic_annotations: ['id'], expression_habits: ['id'], memory_lifecycle: ['memory_id'], proactive_feedback: ['id'], proactive_ownership: ['companion_id'],
+  persona_documents: ['id'], devices: ['id'], device_workspaces: ['device_id', 'cwd'],
 }
 const V2_TABLES = new Set(['personality_profiles', 'personality_heads', 'episodic_annotations', 'expression_habits', 'memory_lifecycle', 'proactive_feedback', 'proactive_ownership'])
 const V3_TABLES = new Set(['response_events','emotion_appraisals','emotion_appraisal_revisions'])
 const V7_TABLES = new Set(['intimacy_stop_events'])
+/** 这三张表随 schema 11 出现；没有 schema 11 的旧包把它们当空表。 */
+const SCHEMA_11_TABLES = new Set(['persona_documents', 'devices', 'device_workspaces'])
 const DERIVED = new Set(['affect_snapshots', 'relationship_episodes'])
 const MAX_BYTES = 256 * 1024 * 1024
 const CHECKPOINT_LIMIT = 8
@@ -157,8 +160,10 @@ export function exportPortable(db: Database, config: Config, file: string, optio
   // envelope before any old reader can partially merge it or discard evidence.
   const payload = db.transaction((): PortablePayload => {
     const tables = snapshotForTransfer(db)
-    // Schema 10 introduces portable stop controls and new cue semantics. Earlier
-    // readers must reject the whole envelope before any partial merge.
+    // Schema 11 adds the persona document and device ledger. The envelope stays at
+    // version 7: an older reader refuses the whole package on the schema checksum
+    // before it can silently drop a persona body, and a v7 package without schema
+    // 11 backfills these tables as empty.
     const version = 7
     return {
     format: 'dsh-companion-transfer', version, formatVersion: version, minReaderVersion: '0.3.0-dev.15', id, createdAtMs: nowMs, companionId: config.companion.id, ownerId,
@@ -194,7 +199,7 @@ export function readPortable(file: string): { payload: PortablePayload; checksum
   if (payload.format !== 'dsh-companion-transfer' || ![1, 2, 3, 4, 5, 6, 7].includes(payload.version) || payload.version !== envelope.version || typeof payload.id !== 'string' || typeof payload.ownerId !== 'string' || !payload.tables || !Array.isArray(payload.ancestors)) throw new Error('Invalid transfer payload')
   for (const table of Object.keys(payload.tables)) if (!Object.hasOwn(TABLES, table) || !Array.isArray(payload.tables[table])) throw new Error(`Unsupported transfer table: ${table}`)
   for (const table of Object.keys(TABLES)) if (!Array.isArray(payload.tables[table])) {
-    if (payload.version === 1 && V2_TABLES.has(table) || V3_TABLES.has(table) && (payload.version < 3 || payload.version === 3 && !payload.schema.some(row => row.version >= 8)) || payload.version < 7 && V7_TABLES.has(table)) payload.tables[table] = []
+    if (SCHEMA_11_TABLES.has(table) && !payload.schema.some(row => row.version >= 11) || payload.version === 1 && V2_TABLES.has(table) || V3_TABLES.has(table) && (payload.version < 3 || payload.version === 3 && !payload.schema.some(row => row.version >= 8)) || payload.version < 7 && V7_TABLES.has(table)) payload.tables[table] = []
     else throw new Error(`Transfer table missing: ${table}`)
   }
   assertIntimacyFormat(payload)
@@ -429,6 +434,16 @@ export function importPortable(db: Database, config: Config, payload: PortablePa
         }
         if (existing && incomingHash === baseHash) continue
         if (!existing && baseHash && populated) continue // Locally deleted: do not resurrect.
+        if (table === 'device_workspaces' && existing) {
+          // 每台设备各占一行，跨机合并不会撞键；同键重入只可能是同一份事实的两次快照，
+          // 因此计数取较大值而不是相加，否则重复导入会把「来过几次」翻倍。
+          writeRow(db, table, { ...row,
+            first_seen_ms: Math.min(Number(existing['first_seen_ms']), Number(row['first_seen_ms'])),
+            last_seen_ms: Math.max(Number(existing['last_seen_ms']), Number(row['last_seen_ms'])),
+            session_count: Math.max(Number(existing['session_count']), Number(row['session_count'])) }, existing)
+          report.updated++
+          continue
+        }
         if (table === 'affect_events' && row['principal_id']) rebuild.add(String(row['principal_id']))
         if (existing && localHash !== baseHash) {
           if (DERIVED.has(table)) { rebuild.add(String(row['principal_id'])); continue }

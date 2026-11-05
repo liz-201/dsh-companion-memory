@@ -1,6 +1,7 @@
 import { ReviewSandbox } from './runtime/review-sandbox.js'
 import { OwnerIdentity } from './domain/owner-identity.js'
 import { registerDevice } from './runtime/device-context.js'
+import { recordDeviceVisit } from './storage/device-ledger.js'
 import { StartupSync } from './storage/startup-sync.js'
 import { MemoryTransfer } from './cloud/memory-transfer.js'
 import { createTransferHandler } from './cloud/transfer-ui.js'
@@ -181,6 +182,7 @@ for (const row of db.all<{ key: string }>("SELECT key FROM plugin_settings WHERE
   repos.setSetting(row.key, '0', Date.now())
 }
 const device = registerDevice(repos)
+recordDeviceVisit(repos, device, process.cwd(), Date.now())
 const owner = new OwnerIdentity(repos, config, Date.now(), device.id)
 repairBridgeAffect(repos,config,Date.now())
 const transfer = new MemoryTransfer(db, config, device.id, { assertMergeIdle: () => {

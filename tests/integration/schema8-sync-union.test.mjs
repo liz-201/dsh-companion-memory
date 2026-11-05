@@ -152,7 +152,7 @@ test('schema 7 upgrades to original schema 8, backfilling only live human privat
     message(old, 'old-owner-statement', { sourceKind: 'owner_statement' })
     remember(old, first, 'old-fact')
     const messages = rows(db, 'raw_messages'), facts = rows(db, 'memories'), evidence = db.all('SELECT * FROM memory_evidence')
-    assert.deepEqual(migrate(db, { now: f.now() + 1, fts5: true, directory: migrationsDirectory }).applied, [8, 9, 10])
+    assert.deepEqual(migrate(db, { now: f.now() + 1, fts5: true, directory: migrationsDirectory }).applied, [8, 9, 10, 11])
     assert.deepEqual(rows(db, 'raw_messages'), messages)
     assert.deepEqual(rows(db, 'memories'), facts)
     assert.deepEqual(db.all('SELECT * FROM memory_evidence'), evidence)

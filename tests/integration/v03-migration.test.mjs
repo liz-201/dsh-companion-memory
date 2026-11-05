@@ -10,10 +10,10 @@ test('new schema migrations roll back as one batch when a later migration fails'
     const directory = path.join(f.directory, 'migrations')
     fs.mkdirSync(directory)
     for (const file of fs.readdirSync('migrations')) fs.copyFileSync(path.join('migrations', file), path.join(directory, file))
-    fs.writeFileSync(path.join(directory, '011_batch_probe.sql'), 'CREATE TABLE batch_probe(id TEXT);')
-    fs.writeFileSync(path.join(directory, '012_invalid.sql'), 'THIS IS INVALID SQL;')
+    fs.writeFileSync(path.join(directory, '012_batch_probe.sql'), 'CREATE TABLE batch_probe(id TEXT);')
+    fs.writeFileSync(path.join(directory, '013_invalid.sql'), 'THIS IS INVALID SQL;')
     assert.throws(() => migrate(f.db, { now: f.now(), fts5: true, directory }))
     assert.equal(f.db.get("SELECT name FROM sqlite_master WHERE name = 'batch_probe'"), undefined)
-    assert.equal(f.db.get('SELECT MAX(version) AS version FROM schema_migrations').version, 10)
+    assert.equal(f.db.get('SELECT MAX(version) AS version FROM schema_migrations').version, 11)
   } finally { f.close() }
 })
